@@ -1,59 +1,135 @@
 # OpenCode Tailnet Launcher
 
-Single-exe Windows tray launcher for keeping `opencode web` alive, plus a small VPS router that pre-seeds OpenCode history before redirecting into the real session page.
+OpenCode Tailnet Launcher is a small two-part setup for accessing remote `opencode web` over Tailscale with minimal friction.
 
-## What It Does
+- Windows side: a silent tray launcher keeps `opencode web` healthy
+- VPS side: a lightweight router inspects remote sessions, seeds browser state, and redirects into the exact session page
 
-- Runs as a silent Windows tray app
-- Never opens a browser on its own
-- Detects the current Tailscale IPv4 and keeps `opencode web` healthy on the configured port
-- Exposes a public router entrypoint that:
-- checks remote OpenCode health
-- reads recent sessions
-- seeds same-origin browser state
-- redirects to the exact remote session route
+The result is a mobile-friendly public entrypoint that does not need the OpenCode desktop app, does not depend on stale browser cache, and does not pop open browsers while you work.
+
+## Features
+
+- Silent Windows tray app
+- Single-exe portable runtime for the launcher
+- No automatic browser popups
+- Auto-detects the current Tailscale IPv4
+- Keeps `opencode web` healthy on the configured port
+- Router pre-seeds same-origin OpenCode history before redirecting
+- Transparent proxy after entering the real OpenCode page
+
+## Architecture
+
+1. `OpenCodeTailnetLauncher.exe` runs on a Windows machine already inside your tailnet.
+2. The launcher detects the machine's current `100.x.x.x` Tailscale address.
+3. If `opencode web` is missing or unhealthy, it starts it again with the configured port and CORS origin.
+4. A VPS-hosted router receives public browser traffic.
+5. The router probes the remote OpenCode server, reads the latest sessions, writes the required browser-side project state, and redirects into the exact session route.
+6. After that handoff, the router behaves as a transparent proxy.
 
 ## Repo Layout
 
 - `launcher/`: Windows tray launcher source and build scripts
 - `router/`: Node-based VPS router source
 - `deploy/`: example `systemd` and `nginx` configs
-- `docs/`: release notes and deployment notes
+- `docs/`: release notes and VPS deployment notes
 
-## Launcher
+## Quick Start
 
-The launcher is a single-exe portable app at runtime.
+### Windows Launcher
 
-- First run can be just `OpenCodeTailnetLauncher.exe`
-- If `oc-launcher.ini` is missing, it generates one beside the exe
-- Logs are written to `logs/launcher.log`
+1. Build the launcher from `launcher/` or download the release asset.
+2. Run `OpenCodeTailnetLauncher.exe`.
+3. It stays in the tray and does not open the browser by itself.
+4. On first run it generates `oc-launcher.ini` beside the exe.
+5. Double-click the tray icon if you want to open the router page manually.
 
-### Commands
+### Autostart
 
 ```powershell
 OpenCodeTailnetLauncher.exe --install-autostart
 OpenCodeTailnetLauncher.exe --remove-autostart
 ```
 
+## Launcher Behavior
+
+The launcher is intentionally quiet.
+
+- No startup window
+- No automatic browser launch
+- No mandatory installer
+- No background Electron or Node runtime
+
+Tray status colors:
+
+- Green: `running`
+- Blue: `starting`
+- Orange: `waiting`
+- Red: `error`
+
+Generated files after first run:
+
+- `oc-launcher.ini`
+- `logs\launcher.log`
+
+## Configuration
+
+The launcher writes `oc-launcher.ini` automatically if it does not exist.
+
+Important keys:
+
+- `cli_path`: path to `opencode.cmd` or another compatible binary
+- `port`: local OpenCode web port, default `3000`
+- `cors_origin`: public router origin that should be allowed by OpenCode web
+- `router_url`: page opened when you double-click the tray icon
+- `poll_seconds`: health-check interval
+
+See `launcher/oc-launcher.ini.example` for the template.
+
 ## VPS Router
 
 The router is designed to sit behind `nginx` and a public hostname.
 
-- `GET /`: landing page
-- `GET /__oc/meta`: health + session inspection
-- `GET /__oc/launch`: pre-seed localStorage then redirect to the exact session route
-- everything else: transparent proxy to the remote `opencode web`
+Core routes:
 
-## Security
+- `GET /`: landing page for entering `host:port`
+- `GET /__oc/meta`: remote health and session inspection
+- `GET /__oc/launch`: pre-seed browser state then redirect to the exact remote session
+- all other paths: proxied through to the remote OpenCode web server
 
-- This repo does not contain any real VPS credentials
-- This repo uses example hostnames and paths only
-- Do not commit real SSH passwords, real domains, or real certificates
+This is what fixes the common first-load problem where a fresh browser or mobile device does not show historical sessions.
+
+## VPS Deployment
+
+Use the templates in:
+
+- `deploy/systemd/opencode-router.service.example`
+- `deploy/nginx/opencode-router.conf.example`
+
+Detailed steps are in `docs/DEPLOY_VPS.md`.
 
 ## Build
 
-Windows launcher build uses the built-in .NET Framework C# compiler on Windows:
+The Windows launcher build uses the built-in .NET Framework C# compiler on Windows.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\launcher\build-oc-launcher.ps1
 ```
+
+That build produces:
+
+- `launcher\dist\OpenCodeTailnetLauncher.exe`
+- `launcher\dist\OpenCodeTailnetLauncher-v0.01-single.zip`
+
+## Security
+
+- This repo does not contain real VPS credentials
+- This repo uses example hostnames and example paths only
+- Do not commit real SSH passwords, real domains, or real certificate files
+
+## Release
+
+Current version:
+
+- `v0.01`
+
+See `docs/RELEASE-v0.01.md` for the release summary.
