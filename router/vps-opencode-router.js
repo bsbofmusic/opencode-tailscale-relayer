@@ -3,6 +3,7 @@ const http = require("http")
 const bindHost = process.env.OPENCODE_ROUTER_HOST || "127.0.0.1"
 const bindPort = Number(process.env.OPENCODE_ROUTER_PORT || "33102")
 const targetCookie = "oc_target"
+const directoryCookie = "oc_directory"
 const maxSessions = 80
 const maxProjects = 12
 const inspectTimeoutMs = 5000
@@ -57,12 +58,28 @@ function getTarget(reqUrl, headers, options) {
   return parseTarget(host, port)
 }
 
+function setCookies(res, items) {
+  const next = items.filter(Boolean)
+  if (!next.length) return
+  res.setHeader("Set-Cookie", next)
+}
+
 function setTargetCookie(res, target) {
-  res.setHeader("Set-Cookie", `${targetCookie}=${target.host}:${target.port}; Path=/; Max-Age=2592000; SameSite=Lax`)
+  setCookies(res, [`${targetCookie}=${target.host}:${target.port}; Path=/; Max-Age=2592000; SameSite=Lax`])
+}
+
+function setContextCookies(res, target, directory) {
+  const items = []
+  if (target?.host && target?.port) items.push(`${targetCookie}=${target.host}:${target.port}; Path=/; Max-Age=2592000; SameSite=Lax`)
+  if (directory) items.push(`${directoryCookie}=${encodeURIComponent(String(directory))}; Path=/; Max-Age=2592000; SameSite=Lax`)
+  setCookies(res, items)
 }
 
 function clearTargetCookie(res) {
-  res.setHeader("Set-Cookie", `${targetCookie}=; Path=/; Max-Age=0; SameSite=Lax`)
+  setCookies(res, [
+    `${targetCookie}=; Path=/; Max-Age=0; SameSite=Lax`,
+    `${directoryCookie}=; Path=/; Max-Age=0; SameSite=Lax`,
+  ])
 }
 
 function json(res, code, body, extra) {
@@ -101,8 +118,18 @@ async function fetchJson(target, path) {
   }
 }
 
-function encodeDir(value) {
-  return Buffer.from(String(value || ""), "utf8").toString("base64")
+function parseDirectory(value) {
+  if (!value) return ""
+  try {
+    return decodeURIComponent(value)
+  } catch {
+    return String(value)
+  }
+}
+
+function getDirectory(reqUrl, headers) {
+  const cookies = parseCookies(headers.cookie)
+  return parseDirectory(reqUrl.searchParams.get("directory") || cookies[directoryCookie] || "")
 }
 
 function latest(items) {
@@ -279,9 +306,10 @@ function launchPage(payload) {
     } else {
       seed(payload)
       status.textContent = 'History seeded. Redirecting...'
-      const next = '/' + payload.launch.directory + '/session/' + encodeURIComponent(payload.launch.sessionID)
+      const next = '/session/' + encodeURIComponent(payload.launch.sessionID)
         + '?host=' + encodeURIComponent(payload.target.host)
         + '&port=' + encodeURIComponent(payload.target.port)
+        + '&directory=' + encodeURIComponent(payload.launch.directory)
       location.replace(next)
     }
   </script>
@@ -300,7 +328,18 @@ function rewriteLocation(value, reqUrl, target) {
   const next = new URL(value, `http://${reqUrl.headersHost || "localhost"}`)
   next.searchParams.set("host", target.host)
   next.searchParams.set("port", target.port)
+  if (reqUrl.directory && !next.searchParams.has("directory")) next.searchParams.set("directory", reqUrl.directory)
   return `${next.pathname}${next.search}${next.hash}`
+}
+
+function upstreamPath(reqUrl, directory) {
+  const next = new URL(reqUrl.pathname, "http://upstream.local")
+  reqUrl.searchParams.forEach((value, key) => {
+    if (key === "host" || key === "port") return
+    next.searchParams.set(key, value)
+  })
+  if (directory && !next.searchParams.has("directory")) next.searchParams.set("directory", directory)
+  return `${next.pathname}${next.search}${reqUrl.hash}`
 }
 
 function landing(target) {
@@ -434,20 +473,13 @@ function landing(target) {
 </html>`
 }
 
-function cleanSearch(input) {
-  const next = new URLSearchParams(input)
-  next.delete("host")
-  next.delete("port")
-  const text = next.toString()
-  return text ? `?${text}` : ""
-}
-
 function proxyRequest(req, res, target, reqUrl) {
+  const directory = getDirectory(reqUrl, req.headers)
   const options = {
     hostname: target.host,
     port: Number(target.port),
     method: req.method,
-    path: `${reqUrl.pathname}${cleanSearch(reqUrl.searchParams)}`,
+    path: upstreamPath(reqUrl, directory),
     headers: {
       ...req.headers,
       host: `${target.host}:${target.port}`,
@@ -457,13 +489,19 @@ function proxyRequest(req, res, target, reqUrl) {
   }
   delete options.headers.cookie
   delete options.headers["content-length"]
+  if (directory) options.headers["x-opencode-directory"] = directory
   const upstream = http.request(options, (up) => {
     const headers = { ...up.headers }
-    const location = rewriteLocation(headers.location, { search: reqUrl.search, headersHost: req.headers.host }, target)
+    const location = rewriteLocation(headers.location, { search: reqUrl.search, headersHost: req.headers.host, directory }, target)
     if (location) headers.location = location
     else delete headers.location
     const wantCookie = reqUrl.searchParams.has("host") || reqUrl.searchParams.has("port")
-    if (wantCookie) headers["set-cookie"] = [`${targetCookie}=${target.host}:${target.port}; Path=/; Max-Age=2592000; SameSite=Lax`]
+    if (wantCookie || directory) {
+      headers["set-cookie"] = [
+        `${targetCookie}=${target.host}:${target.port}; Path=/; Max-Age=2592000; SameSite=Lax`,
+        ...(directory ? [`${directoryCookie}=${encodeURIComponent(directory)}; Path=/; Max-Age=2592000; SameSite=Lax`] : []),
+      ]
+    }
     const type = String(headers["content-type"] || "")
     if (!type.includes("text/html")) {
       res.writeHead(up.statusCode || 502, headers)
@@ -498,12 +536,13 @@ function writeUpgradeResponse(socket, response) {
 }
 
 function proxyUpgrade(req, socket, head, target, reqUrl) {
+  const directory = getDirectory(reqUrl, req.headers)
   const upstream = http.request({
     hostname: target.host,
     port: Number(target.port),
     method: req.method,
-    path: `${reqUrl.pathname}${cleanSearch(reqUrl.searchParams)}`,
-    headers: { ...req.headers, host: `${target.host}:${target.port}`, connection: "upgrade" },
+    path: upstreamPath(reqUrl, directory),
+    headers: { ...req.headers, host: `${target.host}:${target.port}`, connection: "upgrade", ...(directory ? { "x-opencode-directory": directory } : {}) },
   })
   upstream.on("upgrade", (upRes, upSocket, upHead) => {
     writeUpgradeResponse(socket, upRes)
@@ -544,19 +583,28 @@ const server = http.createServer(async (req, res) => {
   }
   if (reqUrl.pathname === "/__oc/meta") {
     const payload = await inspectTarget(target)
-    const extra = wantCookie ? { "Set-Cookie": `${targetCookie}=${target.host}:${target.port}; Path=/; Max-Age=2592000; SameSite=Lax` } : undefined
+    const directory = payload.sessions?.latest?.directory || getDirectory(reqUrl, req.headers)
+    const extra = wantCookie || directory
+      ? {
+          "Set-Cookie": [
+            `${targetCookie}=${target.host}:${target.port}; Path=/; Max-Age=2592000; SameSite=Lax`,
+            ...(directory ? [`${directoryCookie}=${encodeURIComponent(directory)}; Path=/; Max-Age=2592000; SameSite=Lax`] : []),
+          ],
+        }
+      : undefined
     json(res, 200, payload, extra)
     return
   }
   if (reqUrl.pathname === "/__oc/launch") {
     const payload = await inspectTarget(target)
-    if (payload.ready && payload.sessions && payload.sessions.latest) payload.launch = { directory: encodeDir(payload.sessions.latest.directory), sessionID: payload.sessions.latest.id }
-    if (wantCookie) setTargetCookie(res, target)
+    if (payload.ready && payload.sessions && payload.sessions.latest) payload.launch = { directory: payload.sessions.latest.directory, sessionID: payload.sessions.latest.id }
+    const directory = payload.launch?.directory || getDirectory(reqUrl, req.headers)
+    if (wantCookie || directory) setContextCookies(res, target, directory)
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" })
     res.end(launchPage(payload))
     return
   }
-  if (wantCookie) setTargetCookie(res, target)
+  if (wantCookie || getDirectory(reqUrl, req.headers)) setContextCookies(res, target, getDirectory(reqUrl, req.headers))
   proxyRequest(req, res, target, reqUrl)
 })
 

@@ -33,6 +33,14 @@ The result is a mobile-friendly public entrypoint that does not need the OpenCod
 - `deploy/`: example `systemd` and `nginx` configs
 - `docs/`: release notes and VPS deployment notes
 
+## Requirements
+
+- Windows machine already joined to Tailscale
+- OpenCode CLI installed on that Windows machine
+- VPS with Node.js 18+ and `nginx`
+- Public domain name for the router
+- TLS certificate on the VPS
+
 ## Quick Start
 
 ### Windows Launcher
@@ -89,6 +97,8 @@ See `launcher/oc-launcher.ini.example` for the template.
 
 The router is designed to sit behind `nginx` and a public hostname.
 
+In `v0.02`, the router also persists and forwards the active OpenCode directory so restored sessions keep the correct message history, model state, and workspace context after redirect.
+
 Core routes:
 
 - `GET /`: landing page for entering `host:port`
@@ -106,6 +116,8 @@ Use the templates in:
 - `deploy/nginx/opencode-router.conf.example`
 
 Detailed steps are in `docs/DEPLOY_VPS.md`.
+
+The nginx example proxies `/` to the router landing page and forwards every other request to the same local router service.
 
 ## Build
 
@@ -125,11 +137,19 @@ That build produces:
 - This repo does not contain real VPS credentials
 - This repo uses example hostnames and example paths only
 - Do not commit real SSH passwords, real domains, or real certificate files
+- If a GitHub token was ever exposed during setup, revoke it and create a new one before continuing maintenance
+
+## License
+
+This project is released under the MIT License. See `LICENSE`.
 
 ## Release
 
 Current version:
 
-- `v0.01`
+- `v0.02`
 
-See `docs/RELEASE-v0.01.md` for the release summary.
+Release notes:
+
+- `docs/RELEASE-v0.01.md`: initial launcher and router release
+- `docs/RELEASE-v0.02.md`: router directory-context hardening for restored sessions
