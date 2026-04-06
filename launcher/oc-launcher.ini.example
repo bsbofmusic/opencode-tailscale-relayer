@@ -1,0 +1,7 @@
+# OpenCode Tailnet Launcher
+cli_path=C:\Users\YourUser\AppData\Roaming\npm\opencode.cmd
+port=3000
+cors_origin=https://your-domain.example.com
+router_url=https://your-domain.example.com/?autogo=0
+poll_seconds=5
+auto_start=false
