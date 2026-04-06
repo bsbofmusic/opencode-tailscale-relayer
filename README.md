@@ -97,7 +97,7 @@ See `launcher/oc-launcher.ini.example` for the template.
 
 The router is designed to sit behind `nginx` and a public hostname.
 
-In `v0.0.4`, the VPS router pre-warms a target cache before opening the real OpenCode session. That cache now holds the recent session index plus the latest session snapshot so repeat opens avoid the same cold remote reads, while the launch page shows which stage the VPS is reading and caching.
+In `v0.0.5`, the VPS router keeps warm-cache launch behavior from `v0.0.4` and adds transport tuning for weak mobile links: upstream keep-alive, per-target heavy-request queuing, smaller mobile warmups, and nginx compression for the large JSON payloads that dominate session load time.
 
 Core routes:
 
@@ -147,7 +147,7 @@ This project is released under the MIT License. See `LICENSE`.
 
 Current version:
 
-- `v0.0.4`
+- `v0.0.5`
 
 Release notes:
 
@@ -156,3 +156,4 @@ Release notes:
 - `docs/RELEASE-v0.02.1.md`: hotfix for the `v0.02` session-entry regression
 - `docs/RELEASE-v0.0.3.md`: router protocol reset with launch-time state seeding and sandbox-verified recovery
 - `docs/RELEASE-v0.0.4.md`: VPS cache warmup with staged launch progress and cached session snapshots
+- `docs/RELEASE-v0.0.5.md`: mobile stability pass with upstream keep-alive, heavy-request throttling, and gzip transport tuning

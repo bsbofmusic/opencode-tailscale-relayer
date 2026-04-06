@@ -8,7 +8,16 @@ const maxProjects = 12
 const inspectTimeoutMs = 5000
 const metaCacheMs = 15000
 const snapshotCacheMs = 45000
-const warmSessionCount = 4
+const desktopWarmSessionCount = 2
+const mobileWarmSessionCount = 1
+const maxHeavyRequestsPerTarget = 2
+
+const upstreamAgent = new http.Agent({
+  keepAlive: true,
+  keepAliveMsecs: 30000,
+  maxSockets: 16,
+  maxFreeSockets: 8,
+})
 
 const states = new Map()
 
@@ -97,27 +106,56 @@ function text(res, code, body, type) {
 }
 
 async function fetchJson(target, path) {
-  const ctrl = new AbortController()
-  const timer = setTimeout(() => ctrl.abort(), inspectTimeoutMs)
-  const start = Date.now()
-  try {
-    const res = await fetch(`http://${target.host}:${target.port}${path}`, {
-      headers: { Accept: "application/json" },
-      signal: ctrl.signal,
+  return fetchJsonWith(target, path, {})
+}
+
+function requestText(target, path, headers) {
+  return new Promise((resolve, reject) => {
+    const start = Date.now()
+    const req = http.request(
+      {
+        hostname: target.host,
+        port: Number(target.port),
+        path,
+        method: "GET",
+        headers: headers || { Accept: "application/json" },
+        agent: upstreamAgent,
+      },
+      (res) => {
+        const chunks = []
+        res.on("data", (chunk) => chunks.push(chunk))
+        res.on("end", () => {
+          const body = Buffer.concat(chunks).toString("utf8")
+          if ((res.statusCode || 500) >= 400) {
+            reject(new Error(`Upstream returned ${res.statusCode || 500}`))
+            return
+          }
+          resolve({
+            body,
+            latencyMs: Date.now() - start,
+            headers: res.headers,
+          })
+        })
+      },
+    )
+    req.setTimeout(inspectTimeoutMs, () => {
+      req.destroy(new Error(`Timed out after ${inspectTimeoutMs}ms`))
     })
-    const body = await res.text()
-    if (!res.ok) throw new Error(`Upstream returned ${res.status}`)
-    return {
-      data: body ? JSON.parse(body) : null,
-      text: body,
-      latencyMs: Date.now() - start,
-      headers: Object.fromEntries(res.headers.entries()),
-    }
-  } catch (err) {
-    if (err && err.name === "AbortError") throw new Error(`Timed out after ${inspectTimeoutMs}ms`)
-    throw err
-  } finally {
-    clearTimeout(timer)
+    req.on("error", reject)
+    req.end()
+  })
+}
+
+async function fetchJsonWith(target, path, options) {
+  const opts = options || {}
+  const exec = () => requestText(target, path, opts.headers)
+  const res = opts.heavy && opts.state ? await runHeavy(opts.state, exec) : await exec()
+  const body = res.body
+  return {
+    data: body ? JSON.parse(body) : null,
+    text: body,
+    latencyMs: res.latencyMs,
+    headers: res.headers,
   }
 }
 
@@ -144,6 +182,11 @@ function uniqueDirectories(items) {
 function classifyError(err, fallback) {
   const text = err instanceof Error ? err.message : String(err)
   return text || fallback
+}
+
+function isMobile(headers) {
+  const ua = String(headers["user-agent"] || "")
+  return /Android|iPhone|iPad|iPod|Mobile|HarmonyOS/i.test(ua)
 }
 
 function keyFor(target) {
@@ -181,8 +224,11 @@ function createState(target) {
       cachedAt: 0,
       latestSessionID: undefined,
       latestDirectory: undefined,
+      snapshotCount: 0,
       error: null,
     },
+    heavyActive: 0,
+    heavyQueue: [],
     promise: undefined,
   }
 }
@@ -198,6 +244,32 @@ function ensureState(target) {
 
 function setWarm(state, patch) {
   state.warm = { ...state.warm, ...patch }
+}
+
+function runHeavy(state, work) {
+  if (state.heavyActive < maxHeavyRequestsPerTarget) {
+    state.heavyActive += 1
+    return Promise.resolve()
+      .then(work)
+      .finally(() => {
+        state.heavyActive -= 1
+        const next = state.heavyQueue.shift()
+        if (next) next()
+      })
+  }
+  return new Promise((resolve, reject) => {
+    state.heavyQueue.push(() => {
+      state.heavyActive += 1
+      Promise.resolve()
+        .then(work)
+        .then(resolve, reject)
+        .finally(() => {
+          state.heavyActive -= 1
+          const next = state.heavyQueue.shift()
+          if (next) next()
+        })
+    })
+  })
 }
 
 function buildMeta(target, health, list, latencyMs) {
@@ -252,7 +324,7 @@ function rememberList(state, directory, limit) {
 
 async function cacheMessages(state, target, directory, sessionID, limit) {
   const path = `/session/${encodeURIComponent(sessionID)}/message?limit=${limit}&directory=${encodeURIComponent(directory)}`
-  const data = await fetchJson(target, path)
+  const data = await fetchJsonWith(target, path, { heavy: true, state })
   state.messages.set(cacheKey(directory, sessionID, limit), {
     body: data.text,
     type: "application/json",
@@ -265,7 +337,7 @@ async function cacheMessages(state, target, directory, sessionID, limit) {
 
 async function cacheDetail(state, target, directory, sessionID) {
   const path = `/session/${encodeURIComponent(sessionID)}?directory=${encodeURIComponent(directory)}`
-  const data = await fetchJson(target, path)
+  const data = await fetchJsonWith(target, path, { heavy: true, state })
   state.details.set(`${directory}\n${sessionID}`, {
     body: data.text,
     type: "application/json",
@@ -273,9 +345,11 @@ async function cacheDetail(state, target, directory, sessionID) {
   })
 }
 
-async function warm(state, force) {
+async function warm(state, force, options) {
+  const opts = options || {}
+  const requestedSnapshotCount = opts.snapshotCount || desktopWarmSessionCount
   if (state.promise) return state.promise
-  if (!force && fresh(state.metaAt, metaCacheMs) && state.meta) return Promise.resolve(state.meta)
+  if (!force && fresh(state.metaAt, metaCacheMs) && state.meta && state.warm.snapshotCount >= requestedSnapshotCount) return Promise.resolve(state.meta)
   const target = state.target
   const run = (async () => {
     setWarm(state, {
@@ -310,7 +384,7 @@ async function warm(state, force) {
 
     let sessions
     try {
-      sessions = await fetchJson(target, `/session?limit=${maxSessions}`)
+      sessions = await fetchJsonWith(target, `/session?limit=${maxSessions}`, { heavy: true, state })
     } catch (err) {
       setWarm(state, {
         active: false,
@@ -341,9 +415,10 @@ async function warm(state, force) {
     }
 
     const latestSession = state.meta.sessions.latest
+    const snapshotCount = requestedSnapshotCount
     const nearby = state.sessionList
       .filter((item) => item?.directory === latestSession.directory)
-      .slice(0, warmSessionCount)
+      .slice(0, snapshotCount)
 
     setWarm(state, {
       percent: 55,
@@ -351,6 +426,7 @@ async function warm(state, force) {
       note: `Caching ${nearby.length || 1} recent session snapshots...`,
       latestSessionID: latestSession.id,
       latestDirectory: latestSession.directory,
+      snapshotCount,
     })
 
     await cacheDetail(state, target, latestSession.directory, latestSession.id)
@@ -376,6 +452,7 @@ async function warm(state, force) {
       cachedAt: now(),
       latestSessionID: latestSession.id,
       latestDirectory: latestSession.directory,
+      snapshotCount,
       error: null,
     })
 
@@ -725,79 +802,91 @@ function maybeServeCached(req, res, state, reqUrl) {
 }
 
 function proxyRequest(req, res, target, reqUrl, state) {
-  const options = {
-    hostname: target.host,
-    port: Number(target.port),
-    method: req.method,
-    path: `${reqUrl.pathname}${cleanSearch(reqUrl.searchParams)}`,
-    headers: {
-      ...req.headers,
-      host: `${target.host}:${target.port}`,
-      connection: req.headers.upgrade ? "upgrade" : "keep-alive",
-      "accept-encoding": "identity",
-    },
-  }
-  delete options.headers.cookie
-  delete options.headers["content-length"]
-  const upstream = http.request(options, (up) => {
-    const headers = { ...up.headers }
-    const location = rewriteLocation(headers.location, { headersHost: req.headers.host }, target)
-    if (location) headers.location = location
-    else delete headers.location
-    const wantCookie = reqUrl.searchParams.has("host") || reqUrl.searchParams.has("port")
-    if (wantCookie) headers["set-cookie"] = [`${targetCookie}=${target.host}:${target.port}; Path=/; Max-Age=2592000; SameSite=Lax`]
-
-    const dir = reqUrl.searchParams.get("directory") || state?.warm?.latestDirectory
-    const msg = reqUrl.pathname.match(/^\/session\/([^/]+)\/message$/)
-    const limit = Number(reqUrl.searchParams.get("limit") || "0")
-    const canStore = req.method === "GET" && dir && !reqUrl.searchParams.has("cursor") && ((msg && (limit === 80 || limit === 200)) || reqUrl.pathname === "/session" || /^\/session\/[^/]+$/.test(reqUrl.pathname))
-
-    if (!canStore) {
-      res.writeHead(up.statusCode || 502, headers)
-      up.pipe(res)
-      return
+  const heavy = req.method === "GET" && /^\/session(\/|$)/.test(reqUrl.pathname)
+  const runRequest = () => {
+    const options = {
+      hostname: target.host,
+      port: Number(target.port),
+      method: req.method,
+      path: `${reqUrl.pathname}${cleanSearch(reqUrl.searchParams)}`,
+      headers: {
+        ...req.headers,
+        host: `${target.host}:${target.port}`,
+        connection: req.headers.upgrade ? "upgrade" : "keep-alive",
+        "accept-encoding": "identity",
+      },
+      agent: upstreamAgent,
     }
+    delete options.headers.cookie
+    delete options.headers["content-length"]
+    const upstream = http.request(options, (up) => {
+      const headers = { ...up.headers }
+      const location = rewriteLocation(headers.location, { headersHost: req.headers.host }, target)
+      if (location) headers.location = location
+      else delete headers.location
+      const wantCookie = reqUrl.searchParams.has("host") || reqUrl.searchParams.has("port")
+      if (wantCookie) headers["set-cookie"] = [`${targetCookie}=${target.host}:${target.port}; Path=/; Max-Age=2592000; SameSite=Lax`]
 
-    const chunks = []
-    up.on("data", (chunk) => chunks.push(chunk))
-    up.on("end", () => {
-      const body = Buffer.concat(chunks).toString("utf8")
-      if (msg) {
-        const sessionID = decodeURIComponent(msg[1])
-        state.messages.set(cacheKey(dir, sessionID, limit), {
-          body,
-          type: String(headers["content-type"] || "application/json"),
-          at: now(),
-          sessionID,
-          directory: dir,
-          limit,
-        })
+      const dir = reqUrl.searchParams.get("directory") || state?.warm?.latestDirectory
+      const msg = reqUrl.pathname.match(/^\/session\/([^/]+)\/message$/)
+      const limit = Number(reqUrl.searchParams.get("limit") || "0")
+      const canStore = req.method === "GET" && dir && !reqUrl.searchParams.has("cursor") && ((msg && (limit === 80 || limit === 200)) || reqUrl.pathname === "/session" || /^\/session\/[^/]+$/.test(reqUrl.pathname))
+
+      if (!canStore) {
+        res.writeHead(up.statusCode || 502, headers)
+        up.pipe(res)
+        return
       }
-      if (reqUrl.pathname === "/session" && reqUrl.searchParams.get("roots") === "true") {
-        state.lists.set(`${dir}\n${Number(reqUrl.searchParams.get("limit") || "55")}`, {
-          body,
-          type: String(headers["content-type"] || "application/json"),
-          at: now(),
-        })
-      }
-      const detail = reqUrl.pathname.match(/^\/session\/([^/]+)$/)
-      if (detail && dir) {
-        state.details.set(`${dir}\n${decodeURIComponent(detail[1])}`, {
-          body,
-          type: String(headers["content-type"] || "application/json"),
-          at: now(),
-        })
-      }
-      res.writeHead(up.statusCode || 502, headers)
-      res.end(body)
+
+      const chunks = []
+      up.on("data", (chunk) => chunks.push(chunk))
+      up.on("end", () => {
+        const body = Buffer.concat(chunks).toString("utf8")
+        if (msg) {
+          const sessionID = decodeURIComponent(msg[1])
+          state.messages.set(cacheKey(dir, sessionID, limit), {
+            body,
+            type: String(headers["content-type"] || "application/json"),
+            at: now(),
+            sessionID,
+            directory: dir,
+            limit,
+          })
+        }
+        if (reqUrl.pathname === "/session" && reqUrl.searchParams.get("roots") === "true") {
+          state.lists.set(`${dir}\n${Number(reqUrl.searchParams.get("limit") || "55")}`, {
+            body,
+            type: String(headers["content-type"] || "application/json"),
+            at: now(),
+          })
+        }
+        const detail = reqUrl.pathname.match(/^\/session\/([^/]+)$/)
+        if (detail && dir) {
+          state.details.set(`${dir}\n${decodeURIComponent(detail[1])}`, {
+            body,
+            type: String(headers["content-type"] || "application/json"),
+            at: now(),
+          })
+        }
+        res.writeHead(up.statusCode || 502, headers)
+        res.end(body)
+      })
     })
-  })
-  upstream.on("error", (err) => {
-    if (res.headersSent || res.writableEnded || res.destroyed) return
-    json(res, 502, { error: err.message })
-  })
-  req.on("data", (chunk) => upstream.write(chunk))
-  req.on("end", () => upstream.end())
+    upstream.on("error", (err) => {
+      if (res.headersSent || res.writableEnded || res.destroyed) return
+      json(res, 502, { error: err.message })
+    })
+    req.on("data", (chunk) => upstream.write(chunk))
+    req.on("end", () => upstream.end())
+  }
+  if (heavy) {
+    runHeavy(state, runRequest).catch((err) => {
+      if (res.headersSent || res.writableEnded || res.destroyed) return
+      json(res, 502, { error: classifyError(err, "Upstream request failed") })
+    })
+    return
+  }
+  runRequest()
 }
 
 function writeUpgradeResponse(socket, response) {
@@ -817,6 +906,7 @@ function proxyUpgrade(req, socket, head, target, reqUrl) {
     method: req.method,
     path: `${reqUrl.pathname}${cleanSearch(reqUrl.searchParams)}`,
     headers: { ...req.headers, host: `${target.host}:${target.port}`, connection: "upgrade" },
+    agent: upstreamAgent,
   })
   upstream.on("upgrade", (upRes, upSocket, upHead) => {
     writeUpgradeResponse(socket, upRes)
@@ -872,11 +962,12 @@ const server = http.createServer(async (req, res) => {
     return
   }
   const state = ensureState(target)
+  const snapshotCount = isMobile(req.headers) ? mobileWarmSessionCount : desktopWarmSessionCount
   const wantCookie = reqUrl.searchParams.has("host") || reqUrl.searchParams.has("port")
 
   if (reqUrl.pathname === "/__oc/progress") {
     try {
-      void warm(state, false).catch(() => {})
+      void warm(state, false, { snapshotCount }).catch(() => {})
       json(res, 200, progressPayload(state), wantCookie ? { "Set-Cookie": `${targetCookie}=${target.host}:${target.port}; Path=/; Max-Age=2592000; SameSite=Lax` } : undefined)
     } catch (err) {
       json(res, 502, { error: classifyError(err, "Warm failed") })
@@ -886,7 +977,7 @@ const server = http.createServer(async (req, res) => {
 
   if (reqUrl.pathname === "/__oc/meta") {
     try {
-      const meta = state.meta && fresh(state.metaAt, metaCacheMs) ? state.meta : await warm(state, false)
+      const meta = state.meta && fresh(state.metaAt, metaCacheMs) && state.warm.snapshotCount >= snapshotCount ? state.meta : await warm(state, false, { snapshotCount })
       refresh(state)
       json(res, 200, meta, wantCookie ? { "Set-Cookie": `${targetCookie}=${target.host}:${target.port}; Path=/; Max-Age=2592000; SameSite=Lax` } : undefined)
     } catch (err) {
@@ -896,7 +987,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (reqUrl.pathname === "/__oc/launch") {
-    void warm(state, false).catch(() => {})
+    void warm(state, false, { snapshotCount }).catch(() => {})
     if (wantCookie) setTargetCookie(res, target)
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" })
     res.end(launchPage(target))
