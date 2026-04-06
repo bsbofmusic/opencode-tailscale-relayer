@@ -97,7 +97,7 @@ See `launcher/oc-launcher.ini.example` for the template.
 
 The router is designed to sit behind `nginx` and a public hostname.
 
-In `v0.02`, the router also persists and forwards the active OpenCode directory so restored sessions keep the correct message history, model state, and workspace context after redirect.
+In `v0.02.1`, the router persists and forwards the active OpenCode directory, then re-enters the actual web app HTML entrypoint with an injected session route so restored sessions keep the correct message history, model state, and workspace context after redirect.
 
 Core routes:
 
@@ -147,9 +147,10 @@ This project is released under the MIT License. See `LICENSE`.
 
 Current version:
 
-- `v0.02`
+- `v0.02.1`
 
 Release notes:
 
 - `docs/RELEASE-v0.01.md`: initial launcher and router release
-- `docs/RELEASE-v0.02.md`: router directory-context hardening for restored sessions
+- `docs/RELEASE-v0.02.md`: initial router directory-context hardening release
+- `docs/RELEASE-v0.02.1.md`: hotfix for the `v0.02` session-entry regression

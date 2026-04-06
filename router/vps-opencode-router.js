@@ -221,6 +221,13 @@ function bootstrap() {
   return `(function () {
   var key = 'opencode.global.dat:server'
   var origin = location.origin
+  var params = new URLSearchParams(location.search)
+  var session = params.get('session')
+  if (session) {
+    globalThis.process = globalThis.process || {}
+    globalThis.process.env = globalThis.process.env || {}
+    globalThis.process.env.OPENCODE_ROUTE = JSON.stringify({ type: 'session', sessionID: session })
+  }
   function read() { try { return JSON.parse(localStorage.getItem(key) || '{}') } catch { return {} } }
   function write(data) { localStorage.setItem(key, JSON.stringify(data)) }
   fetch('/__oc/meta', { credentials: 'same-origin' })
@@ -306,10 +313,11 @@ function launchPage(payload) {
     } else {
       seed(payload)
       status.textContent = 'History seeded. Redirecting...'
-      const next = '/session/' + encodeURIComponent(payload.launch.sessionID)
+      const next = '/oc-app'
         + '?host=' + encodeURIComponent(payload.target.host)
         + '&port=' + encodeURIComponent(payload.target.port)
         + '&directory=' + encodeURIComponent(payload.launch.directory)
+        + '&session=' + encodeURIComponent(payload.launch.sessionID)
       location.replace(next)
     }
   </script>
@@ -452,7 +460,17 @@ function landing(target) {
       try {
         const t = target()
         status.textContent = 'Restoring history...'
-        location.href = '/__oc/launch?host=' + encodeURIComponent(t.host) + '&port=' + encodeURIComponent(t.port)
+        const url = '/__oc/meta?host=' + encodeURIComponent(t.host) + '&port=' + encodeURIComponent(t.port)
+        const res = await fetch(url, { credentials: 'same-origin' })
+        const data = await res.json()
+        if (!res.ok) throw new Error(data.error || ('Request failed: ' + res.status))
+        if (!data.ready || !data.sessions || !data.sessions.latest || !data.sessions.latest.directory || !data.sessions.latest.id) {
+          throw new Error(data.sessions && data.sessions.error ? data.sessions.error : 'Target is online but has no restoreable session')
+        }
+        location.href = '/oc-app?host=' + encodeURIComponent(t.host)
+          + '&port=' + encodeURIComponent(t.port)
+          + '&directory=' + encodeURIComponent(data.sessions.latest.directory)
+          + '&session=' + encodeURIComponent(data.sessions.latest.id)
       } catch (error) {
         status.textContent = error.message || String(error)
       }
@@ -558,7 +576,7 @@ function proxyUpgrade(req, socket, head, target, reqUrl) {
 
 const server = http.createServer(async (req, res) => {
   const reqUrl = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`)
-  const isLanding = !reqUrl.pathname || reqUrl.pathname === "/" || reqUrl.pathname === "/index.html" || reqUrl.pathname === "/__landing"
+  const isLanding = !reqUrl.pathname || reqUrl.pathname === "/" || reqUrl.pathname === "/index.html" || reqUrl.pathname === "/__landing" || reqUrl.pathname === "/entry"
   if (isLanding) {
     const target = getTarget(reqUrl, req.headers, { allowEmpty: true, useCookie: false }) || { host: "", port: "3000" }
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" })
@@ -595,7 +613,7 @@ const server = http.createServer(async (req, res) => {
     json(res, 200, payload, extra)
     return
   }
-  if (reqUrl.pathname === "/__oc/launch") {
+  if (reqUrl.pathname === "/__oc/launch" || reqUrl.pathname === "/__oc/open") {
     const payload = await inspectTarget(target)
     if (payload.ready && payload.sessions && payload.sessions.latest) payload.launch = { directory: payload.sessions.latest.directory, sessionID: payload.sessions.latest.id }
     const directory = payload.launch?.directory || getDirectory(reqUrl, req.headers)
