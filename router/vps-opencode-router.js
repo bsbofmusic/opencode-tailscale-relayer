@@ -19,6 +19,7 @@ const targetIdleMs = 30 * 60 * 1000
 const cleanupIntervalMs = 5 * 60 * 1000
 const launchRedirectWaitMs = 1200
 const slowHealthLatencyMs = Number(process.env.OPENCODE_ROUTER_SLOW_HEALTH_MS || "1500")
+const maxBackgroundHeavyRequestsPerTarget = Math.max(1, maxHeavyRequestsPerTarget - 1)
 
 const upstreamAgent = new http.Agent({
   keepAlive: true,
@@ -208,6 +209,30 @@ function isHeavyRequest(reqUrl) {
   return /^\/session\/[^/]+\/message$/.test(reqUrl.pathname)
 }
 
+function messageRequestInfo(reqUrl) {
+  const match = reqUrl.pathname.match(/^\/session\/([^/]+)\/message$/)
+  if (!match) return null
+  return {
+    sessionID: decodeURIComponent(match[1]),
+    limit: Number(reqUrl.searchParams.get("limit") || "0"),
+  }
+}
+
+function relayPriority(reqUrl, client) {
+  if (reqUrl.pathname === "/session") return "foreground"
+  const info = messageRequestInfo(reqUrl)
+  if (!info) return "foreground"
+  if (info.limit <= 80) return "foreground"
+  if (!client || client.id === sharedClientID) return "foreground"
+  return client.activeSessionID && client.activeSessionID !== info.sessionID ? "background" : "foreground"
+}
+
+function rememberActiveSession(client, reqUrl) {
+  const match = reqUrl.pathname.match(/^\/[^/]+\/session\/([^/]+)$/)
+  if (!match) return
+  client.activeSessionID = decodeURIComponent(match[1])
+}
+
 function latest(items) {
   return [...items].sort((a, b) => (b.time?.updated ?? b.time?.created ?? 0) - (a.time?.updated ?? a.time?.created ?? 0))[0]
 }
@@ -265,7 +290,9 @@ function createState(target) {
     messages: new Map(),
     details: new Map(),
     heavyActive: 0,
+    heavyBackgroundActive: 0,
     heavyQueue: [],
+    heavyBackgroundQueue: [],
     backgroundActive: 0,
     backgroundQueue: [],
     backgroundKeys: new Set(),
@@ -302,6 +329,7 @@ function createClientState(id) {
     },
     lastError: null,
     lastAccessAt: now(),
+    activeSessionID: undefined,
   }
 }
 
@@ -423,32 +451,45 @@ function cleanupStates(force) {
   }
 }
 
-function runHeavy(state, work) {
-  if (state.heavyActive < maxHeavyRequestsPerTarget) {
+function canRunHeavy(state, priority) {
+  if (state.heavyActive >= maxHeavyRequestsPerTarget) return false
+  if (priority === "background" && state.heavyBackgroundActive >= maxBackgroundHeavyRequestsPerTarget) return false
+  return true
+}
+
+function drainHeavy(state) {
+  while (state.heavyQueue.length && canRunHeavy(state, "foreground")) {
+    const next = state.heavyQueue.shift()
+    next()
+  }
+  while (!state.heavyQueue.length && state.heavyBackgroundQueue.length && canRunHeavy(state, "background")) {
+    const next = state.heavyBackgroundQueue.shift()
+    next()
+  }
+  if (!state.heavyQueue.length && !state.heavyBackgroundQueue.length) pumpBackground(state)
+}
+
+function runHeavy(state, work, priority) {
+  const mode = priority === "background" ? "background" : "foreground"
+  const start = (resolve, reject) => {
     state.heavyActive += 1
-    return Promise.resolve()
+    if (mode === "background") state.heavyBackgroundActive += 1
+    Promise.resolve()
       .then(work)
+      .then(resolve, reject)
       .finally(() => {
         state.heavyActive -= 1
-        const next = state.heavyQueue.shift()
-        if (next) next()
-        else pumpBackground(state)
+        if (mode === "background") state.heavyBackgroundActive -= 1
+        drainHeavy(state)
       })
+  }
+  if (canRunHeavy(state, mode) && (mode === "foreground" || !state.heavyQueue.length)) {
+    return new Promise((resolve, reject) => start(resolve, reject))
   }
   state.stats.heavyQueued += 1
   return new Promise((resolve, reject) => {
-    state.heavyQueue.push(() => {
-      state.heavyActive += 1
-      Promise.resolve()
-        .then(work)
-        .then(resolve, reject)
-        .finally(() => {
-          state.heavyActive -= 1
-          const next = state.heavyQueue.shift()
-          if (next) next()
-          else pumpBackground(state)
-        })
-    })
+    const queue = mode === "background" ? state.heavyBackgroundQueue : state.heavyQueue
+    queue.push(() => start(resolve, reject))
   })
 }
 
@@ -794,7 +835,9 @@ function healthPayload() {
       promiseActive: Boolean(state.promise),
       promiseAgeMs: state.promiseStartedAt ? Math.max(0, now() - state.promiseStartedAt) : 0,
       heavyActive: state.heavyActive,
-      heavyQueued: state.heavyQueue.length,
+      heavyQueued: state.heavyQueue.length + state.heavyBackgroundQueue.length,
+      heavyBackgroundActive: state.heavyBackgroundActive,
+      heavyBackgroundQueued: state.heavyBackgroundQueue.length,
       backgroundActive: state.backgroundActive,
       backgroundQueued: state.backgroundQueue.length,
       backgroundKeys: state.backgroundKeys.size,
@@ -1215,6 +1258,7 @@ function maybeServeCached(req, res, state, client, reqUrl) {
   touchState(state)
   touchClient(client)
   const directory = reqUrl.searchParams.get("directory") || client.warm.latestDirectory
+  const priority = relayPriority(reqUrl, client)
 
   if (reqUrl.pathname === "/session" && reqUrl.searchParams.get("roots") === "true" && directory) {
     const limit = Number(reqUrl.searchParams.get("limit") || "55")
@@ -1225,7 +1269,7 @@ function maybeServeCached(req, res, state, client, reqUrl) {
     }
     state.stats.cacheHit += 1
     if (!fresh(hit.at, snapshotCacheMs)) refresh(state, client)
-    raw(res, hit.status || 200, hit.body, hit.type, { "X-OC-Cache": "hit" })
+    raw(res, hit.status || 200, hit.body, hit.type, { "X-OC-Cache": "hit", "X-OC-Relay-Priority": priority })
     return true
   }
 
@@ -1240,7 +1284,7 @@ function maybeServeCached(req, res, state, client, reqUrl) {
     }
     state.stats.cacheHit += 1
     if (!fresh(hit.at, snapshotCacheMs)) refresh(state, client)
-    raw(res, hit.status || 200, hit.body, hit.type, { "X-OC-Cache": "hit" })
+    raw(res, hit.status || 200, hit.body, hit.type, { "X-OC-Cache": "hit", "X-OC-Relay-Priority": priority })
     return true
   }
 
@@ -1254,15 +1298,16 @@ function maybeServeCached(req, res, state, client, reqUrl) {
     }
     state.stats.cacheHit += 1
     if (!fresh(hit.at, snapshotCacheMs)) refresh(state, client)
-    raw(res, hit.status || 200, hit.body, hit.type, { "X-OC-Cache": "hit" })
+    raw(res, hit.status || 200, hit.body, hit.type, { "X-OC-Cache": "hit", "X-OC-Relay-Priority": priority })
     return true
   }
 
   return false
 }
 
-function proxyRequest(req, res, target, reqUrl, state) {
+function proxyRequest(req, res, target, reqUrl, state, client) {
   const heavy = req.method === "GET" && isHeavyRequest(reqUrl)
+  const priority = relayPriority(reqUrl, client)
   const guardHtml = req.method === "GET" && isSessionHtmlPath(reqUrl.pathname)
   const runRequest = () => {
     const options = {
@@ -1285,6 +1330,7 @@ function proxyRequest(req, res, target, reqUrl, state) {
       if (finished) return
       finished = true
       const headers = { ...up.headers }
+      headers["x-oc-relay-priority"] = priority
       delete headers["content-security-policy"]
       delete headers["content-security-policy-report-only"]
       const location = rewriteLocation(headers.location, { headersHost: req.headers.host }, target)
@@ -1293,12 +1339,13 @@ function proxyRequest(req, res, target, reqUrl, state) {
       const wantCookie = reqUrl.searchParams.has("host") || reqUrl.searchParams.has("port")
       if (wantCookie) headers["set-cookie"] = [`${targetCookie}=${target.host}:${target.port}; Path=/; Max-Age=2592000; SameSite=Lax`]
 
-      const dir = reqUrl.searchParams.get("directory") || state?.warm?.latestDirectory
+      const dir = reqUrl.searchParams.get("directory") || client?.warm?.latestDirectory
       const msg = reqUrl.pathname.match(/^\/session\/([^/]+)\/message$/)
       const limit = Number(reqUrl.searchParams.get("limit") || "0")
       const canStore = req.method === "GET" && dir && !reqUrl.searchParams.has("cursor") && ((msg && (limit === 80 || limit === 200)) || reqUrl.pathname === "/session" || /^\/session\/[^/]+$/.test(reqUrl.pathname))
 
       if (!canStore) {
+        if (guardHtml && (up.statusCode || 0) >= 200 && (up.statusCode || 0) < 300) rememberActiveSession(client, reqUrl)
         res.writeHead(up.statusCode || 502, headers)
         up.pipe(res)
         return
@@ -1339,6 +1386,7 @@ function proxyRequest(req, res, target, reqUrl, state) {
             at: now(),
           })
         }
+        if (guardHtml && ok) rememberActiveSession(client, reqUrl)
         res.writeHead(status, headers)
         res.end(body)
       })
@@ -1365,7 +1413,7 @@ function proxyRequest(req, res, target, reqUrl, state) {
     req.on("end", () => upstream.end())
   }
   if (heavy) {
-    runHeavy(state, runRequest).catch((err) => {
+    runHeavy(state, runRequest, priority).catch((err) => {
       if (res.headersSent || res.writableEnded || res.destroyed) return
       json(res, 502, { error: classifyError(err, "Upstream request failed") })
     })
@@ -1490,7 +1538,7 @@ const server = http.createServer(async (req, res) => {
 
   if (wantCookie) setTargetCookie(res, target)
   if (maybeServeCached(req, res, state, client, reqUrl)) return
-  proxyRequest(req, res, target, reqUrl, state)
+  proxyRequest(req, res, target, reqUrl, state, client)
 })
 
 server.on("upgrade", (req, socket, head) => {
