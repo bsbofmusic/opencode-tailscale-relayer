@@ -18,6 +18,7 @@ const maxTargets = 8
 const targetIdleMs = 30 * 60 * 1000
 const cleanupIntervalMs = 5 * 60 * 1000
 const launchRedirectWaitMs = 1200
+const fastLaunchRedirectWaitMs = Number(process.env.OPENCODE_ROUTER_FAST_LAUNCH_WAIT_MS || "250")
 const slowHealthLatencyMs = Number(process.env.OPENCODE_ROUTER_SLOW_HEALTH_MS || "1500")
 const maxBackgroundHeavyRequestsPerTarget = Math.max(1, maxHeavyRequestsPerTarget - 1)
 const idleRecoveryThresholdMs = Number(process.env.OPENCODE_ROUTER_IDLE_RECOVERY_THRESHOLD_MS || "300000")
@@ -126,6 +127,20 @@ function raw(res, code, body, type, extra) {
   res.end(body)
 }
 
+function relayHeaders(priority, mode, reason, cache) {
+  const headers = {
+    "X-OC-Relay-Priority": priority,
+    "X-OC-Relay-Mode": mode,
+    "X-OC-Relay-Reason": reason,
+  }
+  if (cache) headers["X-OC-Cache"] = cache
+  return headers
+}
+
+function withRelay(headers, priority, mode, reason, cache) {
+  return { ...(headers || {}), ...relayHeaders(priority, mode, reason, cache) }
+}
+
 function text(res, code, body, type) {
   res.writeHead(code, {
     "Content-Type": `${type}; charset=utf-8`,
@@ -196,6 +211,15 @@ function encodeDir(value) {
   return Buffer.from(String(value || ""), "utf8").toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "")
 }
 
+function decodeDir(value) {
+  try {
+    const padded = String(value || "").replace(/-/g, "+").replace(/_/g, "/")
+    return Buffer.from(padded + "=".repeat((4 - (padded.length % 4 || 4)) % 4), "base64").toString("utf8")
+  } catch {
+    return ""
+  }
+}
+
 function buildSessionLocation(target, launch) {
   if (!launch?.directory || !launch?.sessionID) return null
   const params = new URLSearchParams({ host: target.host, port: target.port })
@@ -234,6 +258,7 @@ function relayPriority(reqUrl, client) {
 function rememberActiveSession(client, reqUrl) {
   const match = reqUrl.pathname.match(/^\/[^/]+\/session\/([^/]+)$/)
   if (!match) return
+  client.activeDirectory = decodeDir(reqUrl.pathname.split("/")[1] || "") || client.activeDirectory
   client.activeSessionID = decodeURIComponent(match[1])
 }
 
@@ -283,6 +308,35 @@ function cacheKey(directory, sessionID, limit) {
   return `${directory}\n${sessionID}\n${limit}`
 }
 
+function messageBypass(state, client, directory, sessionID, limit) {
+  if (limit !== 80) return false
+  if (client?.activeSessionID === sessionID && client?.activeDirectory === directory) return true
+  return state.meta?.sessions?.latest?.id === sessionID && state.meta?.sessions?.latest?.directory === directory
+}
+
+function messageBypassReason(state, client, directory, sessionID, limit) {
+  if (limit !== 80) return null
+  if (client?.activeSessionID === sessionID && client?.activeDirectory === directory) return "active-session-bypass"
+  if (state.meta?.sessions?.latest?.id === sessionID && state.meta?.sessions?.latest?.directory === directory) return "latest-session-bypass"
+  return null
+}
+
+function requestDirectory(client, reqUrl) {
+  return reqUrl.searchParams.get("directory") || client?.activeDirectory || client?.warm?.latestDirectory
+}
+
+function setLastReason(state, client, reason) {
+  state.lastReason = reason
+  state.lastReasonClient = client?.id || sharedClientID
+}
+
+function clearLastReason(state, client) {
+  const key = client?.id || sharedClientID
+  if (!state.lastReason || state.lastReasonClient !== key) return
+  state.lastReason = null
+  state.lastReasonClient = null
+}
+
 function createState(target) {
   return {
     target,
@@ -305,12 +359,15 @@ function createState(target) {
     stats: {
       cacheHit: 0,
       cacheMiss: 0,
+      cacheBypass: 0,
       staleLaunch: 0,
       upstreamFetch: 0,
       heavyQueued: 0,
       backgroundQueued: 0,
     },
     lastError: null,
+    lastReason: null,
+    lastReasonClient: null,
     lastAccessAt: now(),
     promise: undefined,
     promiseStartedAt: 0,
@@ -336,6 +393,7 @@ function createClientState(id) {
     lastError: null,
     lastAccessAt: now(),
     activeSessionID: undefined,
+    activeDirectory: undefined,
     resumeSafeUntil: 0,
     resumeReason: null,
   }
@@ -347,6 +405,10 @@ function clientSafeMode(client) {
 
 function clientSafeDelay(client) {
   return clientSafeMode(client) ? recoveryRetryMs : 450
+}
+
+function launchDelay(state, client) {
+  return backgroundWarmPaused(state) || clientSafeMode(client) ? launchRedirectWaitMs : fastLaunchRedirectWaitMs
 }
 
 function backgroundWarmPaused(state) {
@@ -362,12 +424,15 @@ function scheduleBackgroundResume(state) {
   const delay = Math.max(0, ...[...state.clients.values()].map((client) => Math.max(0, (client.resumeSafeUntil || 0) - now())))
   if (!delay) {
     state.resumeTimer = undefined
-    drainHeavy(state)
-    pumpBackground(state)
+    if (!backgroundWarmPaused(state)) {
+      drainHeavy(state)
+      pumpBackground(state)
+    }
     return
   }
   state.resumeTimer = setTimeout(() => {
     state.resumeTimer = undefined
+    if (backgroundWarmPaused(state)) return
     drainHeavy(state)
     pumpBackground(state)
   }, delay)
@@ -444,6 +509,7 @@ function settleWarm(state, client, note) {
 function failWarm(state, client, err, fallback) {
   const message = classifyError(err, fallback)
   state.lastError = message
+  setLastReason(state, client, fallback.toLowerCase().replace(/[^a-z0-9]+/g, "-"))
   client.lastError = message
   if (state.meta?.ready) {
     state.stats.staleLaunch += 1
@@ -557,6 +623,7 @@ function pumpBackground(state) {
     .then(next.run)
     .catch((err) => {
       state.lastError = classifyError(err, "Background cache failed")
+      setLastReason(state, null, "background-cache-failed")
     })
     .finally(() => {
       state.backgroundActive -= 1
@@ -905,6 +972,8 @@ function healthPayload() {
       clients: state.clients.size,
       warmStage: state.promise ? "connect" : "ready",
       stats: state.stats,
+      lastReason: state.lastReason,
+      lastReasonClient: state.lastReasonClient,
       lastError: state.lastError,
     }
   })
@@ -963,7 +1032,7 @@ async function resolveLaunch(state, client, snapshotCount) {
   try {
     await Promise.race([
       warm(state, client, false, { snapshotCount }),
-      new Promise((resolve) => setTimeout(resolve, launchRedirectWaitMs)),
+      new Promise((resolve) => setTimeout(resolve, launchDelay(state, client))),
     ])
   } catch {}
   return progressPayload(state, client)
@@ -1320,7 +1389,7 @@ function maybeServeCached(req, res, state, client, reqUrl) {
   syncWarm(state, client)
   touchState(state)
   touchClient(state, client)
-  const directory = reqUrl.searchParams.get("directory") || client.warm.latestDirectory
+  const directory = requestDirectory(client, reqUrl)
   const priority = relayPriority(reqUrl, client)
 
   if (reqUrl.pathname === "/session" && reqUrl.searchParams.get("roots") === "true" && directory) {
@@ -1331,8 +1400,9 @@ function maybeServeCached(req, res, state, client, reqUrl) {
       return false
     }
     state.stats.cacheHit += 1
+    clearLastReason(state, client)
     if (!fresh(hit.at, snapshotCacheMs)) refresh(state, client)
-    raw(res, hit.status || 200, hit.body, hit.type, { "X-OC-Cache": "hit", "X-OC-Relay-Priority": priority })
+    raw(res, hit.status || 200, hit.body, hit.type, relayHeaders(priority, "cache", "cache-hit", "hit"))
     return true
   }
 
@@ -1340,14 +1410,20 @@ function maybeServeCached(req, res, state, client, reqUrl) {
   if (match && directory && !reqUrl.searchParams.has("cursor")) {
     const sessionID = decodeURIComponent(match[1])
     const limit = Number(reqUrl.searchParams.get("limit") || "0")
+    if (messageBypass(state, client, directory, sessionID, limit)) {
+      state.stats.cacheBypass += 1
+      clearLastReason(state, client)
+      return false
+    }
     const hit = state.messages.get(cacheKey(directory, sessionID, limit))
     if (!hit) {
       state.stats.cacheMiss += 1
       return false
     }
     state.stats.cacheHit += 1
+    clearLastReason(state, client)
     if (!fresh(hit.at, snapshotCacheMs)) refresh(state, client)
-    raw(res, hit.status || 200, hit.body, hit.type, { "X-OC-Cache": "hit", "X-OC-Relay-Priority": priority })
+    raw(res, hit.status || 200, hit.body, hit.type, relayHeaders(priority, "cache", "cache-hit", "hit"))
     return true
   }
 
@@ -1360,8 +1436,9 @@ function maybeServeCached(req, res, state, client, reqUrl) {
       return false
     }
     state.stats.cacheHit += 1
+    clearLastReason(state, client)
     if (!fresh(hit.at, snapshotCacheMs)) refresh(state, client)
-    raw(res, hit.status || 200, hit.body, hit.type, { "X-OC-Cache": "hit", "X-OC-Relay-Priority": priority })
+    raw(res, hit.status || 200, hit.body, hit.type, relayHeaders(priority, "cache", "cache-hit", "hit"))
     return true
   }
 
@@ -1394,7 +1471,11 @@ function proxyRequest(req, res, target, reqUrl, state, client) {
       if (finished) return
       finished = true
       const headers = { ...up.headers }
-      headers["x-oc-relay-priority"] = priority
+      const dir = requestDirectory(client, reqUrl)
+      const msg = reqUrl.pathname.match(/^\/session\/([^/]+)\/message$/)
+      const limit = Number(reqUrl.searchParams.get("limit") || "0")
+      const reason = msg && dir && !reqUrl.searchParams.has("cursor") ? messageBypassReason(state, client, dir, decodeURIComponent(msg[1]), limit) : null
+      Object.assign(headers, relayHeaders(priority, "proxy", reason || "proxy-pass", reason ? "bypass" : undefined))
       delete headers["content-security-policy"]
       delete headers["content-security-policy-report-only"]
       const location = rewriteLocation(headers.location, { headersHost: req.headers.host }, target)
@@ -1402,14 +1483,11 @@ function proxyRequest(req, res, target, reqUrl, state, client) {
       else delete headers.location
       const wantCookie = reqUrl.searchParams.has("host") || reqUrl.searchParams.has("port")
       if (wantCookie) headers["set-cookie"] = [`${targetCookie}=${target.host}:${target.port}; Path=/; Max-Age=2592000; SameSite=Lax`]
-
-      const dir = reqUrl.searchParams.get("directory") || client?.warm?.latestDirectory
-      const msg = reqUrl.pathname.match(/^\/session\/([^/]+)\/message$/)
-      const limit = Number(reqUrl.searchParams.get("limit") || "0")
       const canStore = req.method === "GET" && dir && !reqUrl.searchParams.has("cursor") && ((msg && (limit === 80 || limit === 200)) || reqUrl.pathname === "/session" || /^\/session\/[^/]+$/.test(reqUrl.pathname))
 
       if (!canStore) {
         if (guardHtml && (up.statusCode || 0) >= 200 && (up.statusCode || 0) < 300) rememberActiveSession(client, reqUrl)
+        if ((up.statusCode || 0) >= 200 && (up.statusCode || 0) < 300) clearLastReason(state, client)
         res.writeHead(up.statusCode || 502, headers)
         up.pipe(res)
         return
@@ -1451,6 +1529,7 @@ function proxyRequest(req, res, target, reqUrl, state, client) {
           })
         }
         if (guardHtml && ok) rememberActiveSession(client, reqUrl)
+        if (ok) clearLastReason(state, client)
         res.writeHead(status, headers)
         res.end(body)
       })
@@ -1460,7 +1539,8 @@ function proxyRequest(req, res, target, reqUrl, state, client) {
         if (finished) return
         finished = true
         upstream.destroy(new Error(`Session HTML timed out after ${htmlTimeoutMs}ms`))
-        raw(res, 504, sessionTimeoutPage(target, reqUrl, htmlTimeoutMs), "text/html")
+        setLastReason(state, client, "html-timeout")
+        raw(res, 504, sessionTimeoutPage(target, reqUrl, htmlTimeoutMs), "text/html", relayHeaders(priority, "fallback", "html-timeout"))
       })
     }
     upstream.on("error", (err) => {
@@ -1468,10 +1548,12 @@ function proxyRequest(req, res, target, reqUrl, state, client) {
       finished = true
       if (res.headersSent || res.writableEnded || res.destroyed) return
       if (guardHtml && /timed out/i.test(classifyError(err, ""))) {
-        raw(res, 504, sessionTimeoutPage(target, reqUrl, htmlTimeoutMs), "text/html")
+        setLastReason(state, client, "html-timeout")
+        raw(res, 504, sessionTimeoutPage(target, reqUrl, htmlTimeoutMs), "text/html", relayHeaders(priority, "fallback", "html-timeout"))
         return
       }
-      json(res, 502, { error: err.message })
+      setLastReason(state, client, "upstream-request-failed")
+      json(res, 502, { error: err.message }, relayHeaders(priority, "error", "upstream-request-failed"))
     })
     req.on("data", (chunk) => upstream.write(chunk))
     req.on("end", () => upstream.end())
@@ -1479,7 +1561,8 @@ function proxyRequest(req, res, target, reqUrl, state, client) {
   if (heavy) {
     runHeavy(state, runRequest, priority).catch((err) => {
       if (res.headersSent || res.writableEnded || res.destroyed) return
-      json(res, 502, { error: classifyError(err, "Upstream request failed") })
+      setLastReason(state, client, "upstream-request-failed")
+      json(res, 502, { error: classifyError(err, "Upstream request failed") }, relayHeaders(priority, "error", "upstream-request-failed"))
     })
     return
   }
@@ -1585,7 +1668,7 @@ const server = http.createServer(async (req, res) => {
     return
   }
   if (reqUrl.pathname === "/__oc/healthz") {
-    json(res, 200, healthPayload())
+    json(res, 200, healthPayload(), relayHeaders("foreground", "control", "healthz"))
     return
   }
   const target = getTarget(reqUrl, req.headers)
@@ -1600,9 +1683,11 @@ const server = http.createServer(async (req, res) => {
 
   if (reqUrl.pathname === "/__oc/progress") {
     try {
-      json(res, 200, progressPayload(state, client), wantCookie ? { "Set-Cookie": `${targetCookie}=${target.host}:${target.port}; Path=/; Max-Age=2592000; SameSite=Lax` } : undefined)
+      clearLastReason(state, client)
+      json(res, 200, progressPayload(state, client), withRelay(wantCookie ? { "Set-Cookie": `${targetCookie}=${target.host}:${target.port}; Path=/; Max-Age=2592000; SameSite=Lax` } : undefined, "foreground", "control", clientSafeMode(client) ? "resume-safe-progress" : "progress"))
     } catch (err) {
-      json(res, 502, { error: classifyError(err, "Warm failed") })
+      setLastReason(state, client, "warm-failed")
+      json(res, 502, { error: classifyError(err, "Warm failed") }, relayHeaders("foreground", "error", "warm-failed"))
     }
     return
   }
@@ -1611,9 +1696,11 @@ const server = http.createServer(async (req, res) => {
     try {
       const meta = state.meta && state.meta.ready ? state.meta : await warm(state, client, false, { snapshotCount })
       refresh(state, client)
-      json(res, 200, meta, wantCookie ? { "Set-Cookie": `${targetCookie}=${target.host}:${target.port}; Path=/; Max-Age=2592000; SameSite=Lax` } : undefined)
+      clearLastReason(state, client)
+      json(res, 200, meta, withRelay(wantCookie ? { "Set-Cookie": `${targetCookie}=${target.host}:${target.port}; Path=/; Max-Age=2592000; SameSite=Lax` } : undefined, "foreground", "control", clientSafeMode(client) ? "resume-safe-meta" : "meta"))
     } catch (err) {
-      json(res, 502, { error: classifyError(err, "Target inspection failed") })
+      setLastReason(state, client, "target-inspection-failed")
+      json(res, 502, { error: classifyError(err, "Target inspection failed") }, relayHeaders("foreground", "error", "target-inspection-failed"))
     }
     return
   }
@@ -1622,11 +1709,13 @@ const server = http.createServer(async (req, res) => {
     const payload = await resolveLaunch(state, client, snapshotCount)
     if (wantCookie) setTargetCookie(res, target)
     if (payload.launchReady && payload.launch) {
-      res.writeHead(302, { Location: buildSessionLocation(target, payload.launch), "Cache-Control": "no-store" })
+      clearLastReason(state, client)
+      res.writeHead(302, withRelay({ Location: buildSessionLocation(target, payload.launch), "Cache-Control": "no-store" }, "foreground", "control", payload.resumeSafeMode ? "resume-safe-launch" : "launch-redirect"))
       res.end()
       return
     }
-    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" })
+    clearLastReason(state, client)
+    res.writeHead(200, withRelay({ "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" }, "foreground", "control", payload.resumeSafeMode ? "resume-safe-launch-page" : "launch-page"))
     res.end(launchPage(target, client.id))
     return
   }
