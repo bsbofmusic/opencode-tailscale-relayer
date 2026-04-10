@@ -12,11 +12,25 @@ const defaults = {
   idleRecoveryWindowMs: 30000,
 }
 
+function emptyHead() {
+  return {
+    sessionID: null,
+    directory: null,
+    messageCount: 0,
+    tailID: null,
+    updatedAt: 0,
+  }
+}
+
 function createState(target) {
   return {
     target,
     config: undefined,
     clients: new Map(),
+    latestHead: emptyHead(),
+    activeHeads: new Map(),
+    syncVersion: 0,
+    lastSyncAt: 0,
     meta: undefined,
     metaAt: 0,
     sessionList: [],
@@ -75,9 +89,107 @@ function createClientState(id) {
     lastAccessAt: now(),
     activeSessionID: undefined,
     activeDirectory: undefined,
+    view: null,
+    viewHead: emptyHead(),
+    remoteHead: emptyHead(),
+    syncState: "idle",
+    staleReason: null,
+    lastAction: "noop",
+    lastActionAt: 0,
+    refreshFailures: 0,
     resumeSafeUntil: 0,
     resumeReason: null,
   }
+}
+
+function setClientView(client, view) {
+  client.view = view || null
+}
+
+function parseHeadBody(body) {
+  try {
+    const rows = JSON.parse(body || "[]")
+    if (!Array.isArray(rows)) return []
+    return rows
+  } catch {
+    return []
+  }
+}
+
+function headFromEntry(entry, fallback) {
+  const base = fallback || emptyHead()
+  if (!entry) return { ...base }
+  const rows = parseHeadBody(entry.body)
+  const tail = rows.length ? rows[rows.length - 1] : null
+  return {
+    sessionID: entry.sessionID || base.sessionID || null,
+    directory: entry.directory || base.directory || null,
+    messageCount: rows.length,
+    tailID: tail?.info?.id || tail?.id || null,
+    updatedAt: entry.at || now(),
+  }
+}
+
+function messageHead(state, directory, sessionID, limit) {
+  return headFromEntry(
+    state.messages.get(`${directory}\n${sessionID}\n${limit}`),
+    { sessionID, directory, messageCount: 0, tailID: null, updatedAt: 0 },
+  )
+}
+
+function setClientHeads(state, client, viewHead, remoteHead) {
+  client.viewHead = viewHead ? { ...viewHead } : emptyHead()
+  client.remoteHead = remoteHead ? { ...remoteHead } : emptyHead()
+  state.activeHeads.set(client.id, { ...client.remoteHead })
+  if (client.remoteHead.sessionID) state.latestHead = { ...client.remoteHead }
+  state.syncVersion += 1
+  state.lastSyncAt = now()
+}
+
+function setSyncState(client, syncState, staleReason, lastAction) {
+  client.syncState = syncState
+  client.staleReason = staleReason
+  client.lastAction = lastAction
+  client.lastActionAt = now()
+}
+
+function syncAction(state, client) {
+  if (state.offline) return "noop"
+  if (client.syncState !== "stale") return "noop"
+  if (clientSafeMode(client) || backgroundWarmPaused(state)) return "defer"
+  if (!client.view?.sessionID || !client.view?.directory) return "re-enter"
+  if ((client.refreshFailures || 0) >= 2) return "re-enter"
+  return "soft-refresh"
+}
+
+function syncClientView(state, client) {
+  const latest = state.meta?.sessions?.latest
+  if (!client.view && latest?.id && latest?.directory) {
+    client.activeSessionID = client.activeSessionID || latest.id
+    client.activeDirectory = client.activeDirectory || latest.directory
+    setClientView(client, {
+      sessionID: latest.id,
+      directory: latest.directory,
+      pathname: null,
+    })
+  }
+  const view = client.view
+  if (!view?.sessionID || !view.directory) {
+    if (state.offline) setSyncState(client, "offline", "target-offline", client.lastAction || "noop")
+    return
+  }
+  const remoteHead = messageHead(state, view.directory, view.sessionID, 80)
+  const viewHead = client.staleReason && client.viewHead?.sessionID ? client.viewHead : remoteHead
+  setClientHeads(state, client, viewHead, remoteHead)
+  if (state.offline) {
+    setSyncState(client, "offline", "target-offline", client.lastAction || "noop")
+    return
+  }
+  if (client.staleReason === "target-offline") {
+    setSyncState(client, "live", null, "noop")
+    return
+  }
+  if (!client.staleReason) setSyncState(client, "live", null, client.lastAction || "noop")
 }
 
 function touchState(state) {
@@ -190,7 +302,12 @@ function cleanupStates(states, force, config) {
     .filter(([, s]) => !s.promise && !s.heavyActive && !s.backgroundActive && !s.ptyActive && !s.resumeTimer)
     .sort((a, b) => a[1].lastAccessAt - b[1].lastAccessAt)
   while (states.size > cfg.maxTargets && victims.length) {
-    states.delete(victims.shift()[0])
+    const [key, state] = victims.shift()
+    if (state.watcherTimer) {
+      const { stopWatcher } = require("./sync/watcher")
+      stopWatcher(state)
+    }
+    states.delete(key)
   }
 }
 
@@ -218,8 +335,11 @@ function rememberActiveSession(client, reqUrl) {
   const { decodeDir } = require("./util")
   const match = reqUrl.pathname.match(/^\/[^/]+\/session\/([^/]+)$/)
   if (!match) return
-  client.activeDirectory = decodeDir(reqUrl.pathname.split("/")[1] || "") || client.activeDirectory
-  client.activeSessionID = decodeURIComponent(match[1])
+  const directory = decodeDir(reqUrl.pathname.split("/")[1] || "") || client.activeDirectory
+  const sessionID = decodeURIComponent(match[1])
+  client.activeDirectory = directory
+  client.activeSessionID = sessionID
+  setClientView(client, { directory, sessionID, pathname: reqUrl.pathname })
 }
 
 function requestDirectory(client, reqUrl) {
@@ -254,6 +374,7 @@ module.exports = {
   defaults,
   createState,
   createClientState,
+  emptyHead,
   touchState,
   touchClient,
   clientSafeMode,
@@ -264,6 +385,12 @@ module.exports = {
   ensureState,
   cleanupStates,
   setWarm,
+  setClientView,
+  messageHead,
+  setClientHeads,
+  setSyncState,
+  syncAction,
+  syncClientView,
   warmBusy,
   setLastReason,
   clearLastReason,

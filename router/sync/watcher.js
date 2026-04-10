@@ -1,16 +1,17 @@
 "use strict"
 
-const { backgroundWarmPaused, setLastReason } = require("../state")
+const { backgroundWarmPaused, setLastReason, setClientHeads, setSyncState } = require("../state")
 const { uniqueDirectories } = require("../util")
 const { emitTargetEvent } = require("./bus")
 const { saveStateCache } = require("./disk-cache")
 
 async function tickWatcher(state, config) {
   if (state.watcherBusy || !state.meta?.ready || !state.clients.size) return
-  if (state.promise || backgroundWarmPaused(state)) return
+  if (state.promise) return
   state.watcherBusy = true
   const { fetchJson, fetchJsonWith, buildMeta, rememberList } = require("../warm")
   try {
+    const protectedMode = backgroundWarmPaused(state)
     const wasOffline = state.offline
     const health = await fetchJson(state.target, "/global/health", config)
     const sessions = await fetchJsonWith(state.target, `/session?limit=${config.maxSessions || 80}`, { state, priority: "background", heavy: true }, config)
@@ -31,17 +32,19 @@ async function tickWatcher(state, config) {
       })
     }
 
-    const entries = [...state.messages.entries()]
+    const entries = protectedMode ? activeEntries(state) : [...state.messages.entries()]
     for (const [entryKey, entry] of entries) {
       const next = await fetchJsonWith(
         state.target,
         `/session/${encodeURIComponent(entry.sessionID)}/message?limit=${entry.limit}&directory=${encodeURIComponent(entry.directory)}`,
-        { state, priority: "background", heavy: true },
+        { state, priority: protectedMode ? "foreground" : "background", heavy: true },
         config,
       )
       if (next.text === entry.body) continue
-      const prevCount = Array.isArray(JSON.parse(entry.body || "[]")) ? JSON.parse(entry.body || "[]").length : 0
-      const nextCount = Array.isArray(next.data) ? next.data.length : 0
+      const prevHead = headFromBody(entry.sessionID, entry.directory, entry.body)
+      const nextHead = headFromBody(entry.sessionID, entry.directory, next.text)
+      const prevCount = prevHead.messageCount
+      const nextCount = nextHead.messageCount
       state.messages.set(entryKey, {
         ...entry,
         body: next.text,
@@ -55,6 +58,32 @@ async function tickWatcher(state, config) {
         previousCount: prevCount,
         nextCount,
       })
+      for (const client of state.clients.values()) {
+        const view = client.view || (client.activeSessionID && client.activeDirectory
+          ? { sessionID: client.activeSessionID, directory: client.activeDirectory }
+          : null)
+        if (!view) continue
+        if (view.sessionID !== entry.sessionID || view.directory !== entry.directory) continue
+        if (sameHead(prevHead, nextHead)) continue
+        if (entry.baseline) {
+          setClientHeads(state, client, nextHead, nextHead)
+          setSyncState(client, state.offline ? "offline" : "live", null, "noop")
+          continue
+        }
+        const viewHead = client.remoteHead?.sessionID ? client.remoteHead : prevHead
+        setClientHeads(state, client, viewHead, nextHead)
+        setSyncState(client, "stale", "head-advanced", client.lastAction || "noop")
+        emitTargetEvent(state.target, "sync-stale", {
+          client: client.id,
+          sessionID: entry.sessionID,
+          directory: entry.directory,
+          reason: "head-advanced",
+          action: client.lastAction || "noop",
+          state: client.syncState,
+          version: state.syncVersion,
+          timestamp: Date.now(),
+        })
+      }
     }
 
     saveStateCache(state, config)
@@ -68,11 +97,69 @@ async function tickWatcher(state, config) {
     state.offlineReason = err.message
     setLastReason(state, null, "watcher-offline")
     if (becameOffline) {
+      for (const client of state.clients.values()) {
+        setSyncState(client, "offline", "target-offline", "noop")
+        emitTargetEvent(state.target, "sync-stale", {
+          client: client.id,
+          sessionID: client.activeSessionID || null,
+          directory: client.activeDirectory || null,
+          reason: "target-offline",
+          action: "noop",
+          state: client.syncState,
+          version: state.syncVersion,
+          timestamp: Date.now(),
+        })
+      }
       emitTargetEvent(state.target, "target-health-changed", { healthy: false, error: err.message })
     }
   } finally {
     state.watcherBusy = false
   }
+}
+
+function headFromBody(sessionID, directory, body) {
+  let rows = []
+  try {
+    rows = JSON.parse(body || "[]")
+  } catch {}
+  if (!Array.isArray(rows)) rows = []
+  const tail = rows.length ? rows[rows.length - 1] : null
+  return {
+    sessionID,
+    directory,
+    messageCount: rows.length,
+    tailID: tail?.info?.id || tail?.id || null,
+  }
+}
+
+function sameHead(a, b) {
+  return Boolean(
+    a &&
+    b &&
+    a.sessionID === b.sessionID &&
+    a.directory === b.directory &&
+    a.messageCount === b.messageCount &&
+    a.tailID === b.tailID
+  )
+}
+
+function activeEntries(state) {
+  const entries = new Map()
+  for (const client of state.clients.values()) {
+    const sessionID = client.activeSessionID || client.view?.sessionID
+    const directory = client.activeDirectory || client.view?.directory
+    if (!sessionID || !directory) continue
+    const key = cacheKey(directory, sessionID, 80)
+    entries.set(key, state.messages.get(key) || {
+      sessionID,
+      directory,
+      limit: 80,
+      body: "[]",
+      at: 0,
+      baseline: true,
+    })
+  }
+  return [...entries.entries()]
 }
 
 function startWatcher(state, config) {

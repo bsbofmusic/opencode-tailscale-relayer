@@ -2,8 +2,8 @@
 
 const http = require("http")
 const { json, raw, relayHeaders } = require("../http")
-const { sessionTimeoutPage } = require("../pages")
-const { clientSafeMode, clearLastReason, setLastReason, rememberActiveSession, requestDirectory, messageBypassReason } = require("../state")
+const { sessionTimeoutPage, sessionSyncRuntime } = require("../pages")
+const { clientSafeMode, clearLastReason, setLastReason, rememberActiveSession, requestDirectory, messageBypassReason, setClientHeads, setSyncState, syncAction, syncClientView } = require("../state")
 const { runHeavy } = require("../heavy")
 const { getAgent } = require("../warm")
 const { cleanSearch, validClient, classifyError, isHeavyRequest, isSessionHtmlPath, cacheKey, now } = require("../util")
@@ -62,7 +62,7 @@ function proxyRequest(ctx, req, res) {
       if (location) headers.location = location
       else delete headers.location
       if (wantCookie) headers["set-cookie"] = [`${targetCookie}=${target.host}:${target.port}; Path=/; Max-Age=2592000; SameSite=Lax`]
-      const canStore = req.method === "GET" && dir && !reqUrl.searchParams.has("cursor") && ((msg && (limit === 80 || limit === 200)) || reqUrl.pathname === "/session" || /^\/session\/[^/]+$/.test(reqUrl.pathname))
+      const canStore = guardHtml || (req.method === "GET" && dir && !reqUrl.searchParams.has("cursor") && ((msg && (limit === 80 || limit === 200)) || reqUrl.pathname === "/session" || /^\/session\/[^/]+$/.test(reqUrl.pathname)))
 
       if (!canStore) {
         if (guardHtml && (up.statusCode || 0) >= 200 && (up.statusCode || 0) < 300) rememberActiveSession(client, reqUrl)
@@ -76,7 +76,7 @@ function proxyRequest(ctx, req, res) {
       up.on("data", (chunk) => chunks.push(chunk))
       up.on("end", () => {
         const status = up.statusCode || 502
-        const body = Buffer.concat(chunks).toString("utf8")
+        let body = Buffer.concat(chunks).toString("utf8")
         const ok = status >= 200 && status < 300
         if (ok && msg) {
           const sessionID = decodeURIComponent(msg[1])
@@ -107,7 +107,23 @@ function proxyRequest(ctx, req, res) {
             at: now(),
           })
         }
-        if (guardHtml && ok) rememberActiveSession(client, reqUrl)
+        if (guardHtml && ok) {
+          rememberActiveSession(client, reqUrl)
+          syncClientView(state, client)
+          if (client.remoteHead?.sessionID && client.remoteHead.sessionID === client.activeSessionID && client.remoteHead.directory === client.activeDirectory) {
+            setClientHeads(state, client, client.remoteHead, client.remoteHead)
+            setSyncState(client, "live", null, "noop")
+            client.refreshFailures = 0
+          }
+          if (String(headers["content-type"] || "").includes("text/html")) {
+            body = injectRuntime(body)
+            delete headers["transfer-encoding"]
+            headers["content-length"] = Buffer.byteLength(body, "utf8")
+          }
+          headers["x-oc-relay-sync-state"] = client.syncState || (state.offline ? "offline" : "live")
+          headers["x-oc-relay-stale-reason"] = client.staleReason || ""
+          headers["x-oc-relay-action"] = syncAction(state, client)
+        }
         if (ok) {
           state.offline = false
           state.offlineReason = null
@@ -123,6 +139,7 @@ function proxyRequest(ctx, req, res) {
         if (finished) return
         finished = true
         upstream.destroy(new Error(`Session HTML timed out after ${htmlTimeoutMs}ms`))
+        if (client.lastAction === "soft-refresh") client.refreshFailures = (client.refreshFailures || 0) + 1
         setLastReason(state, client, "html-timeout")
         raw(res, 504, sessionTimeoutPage(target, reqUrl, htmlTimeoutMs), "text/html", relayHeaders(priority, "fallback", "html-timeout"))
       })
@@ -132,6 +149,7 @@ function proxyRequest(ctx, req, res) {
       finished = true
       if (res.headersSent || res.writableEnded || res.destroyed) return
       if (guardHtml && /timed out/i.test(classifyError(err, ""))) {
+        if (client.lastAction === "soft-refresh") client.refreshFailures = (client.refreshFailures || 0) + 1
         setLastReason(state, client, "html-timeout")
         raw(res, 504, sessionTimeoutPage(target, reqUrl, htmlTimeoutMs), "text/html", relayHeaders(priority, "fallback", "html-timeout"))
         return
@@ -153,6 +171,13 @@ function proxyRequest(ctx, req, res) {
     return
   }
   runRequest()
+}
+
+function injectRuntime(body) {
+  const tag = sessionSyncRuntime()
+  if (body.includes("oc-tailnet-sync-runtime")) return body
+  if (body.includes("</body>")) return body.replace("</body>", `${tag}</body>`)
+  return `${body}${tag}`
 }
 
 module.exports = { proxyRequest, rewriteLocation }

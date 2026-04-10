@@ -35,17 +35,27 @@ function getAgent() {
   return upstreamAgent
 }
 
+function upstreamAuth() {
+  const password = process.env.OPENCODE_SERVER_PASSWORD
+  if (!password) return null
+  const username = process.env.OPENCODE_SERVER_USERNAME || "opencode"
+  return "Basic " + Buffer.from(`${username}:${password}`).toString("base64")
+}
+
 function requestText(target, path, headers, config) {
   const cfg = config || defaults
   return new Promise((resolve, reject) => {
     const start = Date.now()
+    const base = headers || { Accept: "application/json" }
+    const auth = upstreamAuth()
+    if (auth && !base.Authorization && !base.authorization) base.Authorization = auth
     const req = http.request(
       {
         hostname: target.host,
         port: Number(target.port),
         path,
         method: "GET",
-        headers: headers || { Accept: "application/json" },
+        headers: base,
         agent: getAgent(),
       },
       (res) => {

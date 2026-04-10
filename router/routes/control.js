@@ -2,7 +2,7 @@
 
 const { json, withRelay, relayHeaders } = require("../http")
 const { launchPage } = require("../pages")
-const { clientSafeMode, clearLastReason, setLastReason, warmBusy, backgroundWarmPaused } = require("../state")
+const { clientSafeMode, clearLastReason, setLastReason, warmBusy, backgroundWarmPaused, syncAction, syncClientView } = require("../state")
 const { syncWarm, warm, refresh } = require("../warm")
 const { classifyError, encodeDir } = require("../util")
 const { targetCookie } = require("../context")
@@ -18,8 +18,20 @@ function clearTargetCookie(res) {
 
 function progressPayload(state, client) {
   syncWarm(state, client)
+  syncClientView(state, client)
   const launchReady = Boolean(state.meta?.ready && state.meta?.sessions?.latest?.id && state.meta?.sessions?.latest?.directory)
+  const launchTarget = client.view?.sessionID && client.view?.directory
+    ? { id: client.view.sessionID, directory: client.view.directory }
+    : state.meta?.sessions?.latest
   const refreshing = Boolean(client.warm.active && warmBusy(state))
+  const action = syncAction(state, client)
+  const syncState = action === "defer" && client.syncState === "stale"
+    ? "protected"
+    : client.syncState || (state.offline ? "offline" : launchReady ? "live" : "idle")
+  if (client.lastAction !== action) {
+    client.lastAction = action
+    client.lastActionAt = Date.now()
+  }
   const payload = {
     target: state.target,
     ready: client.warm.ready && Boolean(state.meta?.ready),
@@ -31,13 +43,20 @@ function progressPayload(state, client) {
     offline: state.offline,
     offlineReason: state.offlineReason,
     cacheState: !state.meta ? "cold" : refreshing ? "stale" : "warm",
+    syncState,
+    staleReason: client.staleReason || null,
+    lastAction: action,
+    lastActionAt: client.lastActionAt || 0,
+    viewHead: client.viewHead || null,
+    remoteHead: client.remoteHead || null,
+    protected: syncState === "protected",
     warm: client.warm,
     meta: state.meta || null,
   }
-  if (launchReady && state.meta?.sessions?.latest) {
+  if (launchReady && launchTarget) {
     payload.launch = {
-      directory: encodeDir(state.meta.sessions.latest.directory),
-      sessionID: state.meta.sessions.latest.id,
+      directory: encodeDir(launchTarget.directory),
+      sessionID: launchTarget.id,
       client: client.id,
     }
   }
@@ -76,6 +95,8 @@ function healthPayload(states) {
   const { syncClients } = require("../warm")
   const summary = [...states.values()].map((state) => {
     syncClients(state)
+    const staleClients = [...state.clients.values()].filter((client) => client.syncState === "stale").length
+    const protectedClients = [...state.clients.values()].filter((client) => syncAction(state, client) === "defer").length
     return {
       target: state.target,
       launchReady: Boolean(state.meta?.ready && state.meta?.sessions?.latest?.id),
@@ -98,6 +119,8 @@ function healthPayload(states) {
       resumeSafeClients: [...state.clients.values()].filter((c) => clientSafeMode(c)).length,
       ptyActive: state.ptyActive,
       clients: state.clients.size,
+      staleClients,
+      protectedClients,
       warmStage: state.promise ? "connect" : "ready",
       stats: state.stats,
       lastReason: state.lastReason,

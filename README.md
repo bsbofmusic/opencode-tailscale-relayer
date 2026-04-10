@@ -16,6 +16,9 @@ The result is a mobile-friendly public entrypoint that does not need the OpenCod
 - Keeps `opencode web` healthy on the configured port
 - Router pre-seeds same-origin OpenCode history before redirecting
 - Transparent proxy after entering the real OpenCode page
+- Active-session sync on the already-open session page
+- Inline router-owned sync runtime injected into session HTML only
+- Safe sync actions: `noop`, `soft-refresh`, `defer`, `re-enter`
 - Modular router runtime with disk-backed cache recovery, background watch refresh, SSE progress/events, and offline-ready fallback behavior
 
 ## Architecture
@@ -25,7 +28,7 @@ The result is a mobile-friendly public entrypoint that does not need the OpenCod
 3. If `opencode web` is missing or unhealthy, it starts it again with the configured port and CORS origin.
 4. A VPS-hosted router receives public browser traffic.
 5. The router probes the remote OpenCode server, reads the latest sessions, writes the required browser-side project state, and redirects into the exact session route.
-6. After that handoff, the router behaves as a transparent proxy.
+6. After that handoff, the router continues to coordinate active-session freshness through router-side state, SSE events, and session-page sync actions.
 
 ## Repo Layout
 
@@ -99,7 +102,7 @@ See `launcher/oc-launcher.ini.example` for the template.
 
 The router is designed to sit behind `nginx` and a public hostname.
 
-The public router now uses the same modular final-experience baseline as the local stable build: disk cache recovery, background watcher refresh, SSE progress/events, launch-time state seeding, offline-ready cache fallback, and transparent proxy handoff all live under `router/` while the public entry file path stays `router/vps-opencode-router.js`.
+The public router now uses the same modular final-experience baseline as the local stable build: disk cache recovery, background watcher refresh, SSE progress/events, launch-time state seeding, offline-ready cache fallback, transparent proxy handoff, and active-session sync all live under `router/` while the public entry file path stays `router/vps-opencode-router.js`.
 
 Core routes:
 
@@ -112,6 +115,8 @@ Core routes:
 
 This is what fixes the common first-load problem where a fresh browser or mobile device does not show historical sessions.
 
+From `v0.1.1` onward, the router also closes the post-launch stale-page gap: it can mark the current session page stale, choose a safe action, and keep the open page aligned without patching upstream `opencode`.
+
 ## VPS Deployment
 
 Use the templates in:
@@ -122,6 +127,11 @@ Use the templates in:
 Detailed steps are in `docs/DEPLOY_VPS.md`.
 
 The nginx example proxies `/` to the router landing page and forwards every other request to the same local router service.
+
+Pre-ship rule: do not treat syntax checks and sandbox checks as release evidence by themselves. The release gate is a real browser run through `node .\verify-launch-gate.js` against the live router URL and target host.
+
+If Playwright is not resolvable from the current Node environment, provide `PLAYWRIGHT_NODE_PATH` to the installed Playwright module path.
+Install the Chromium browser for Playwright before using the gate.
 
 ## Build
 
@@ -134,7 +144,7 @@ powershell -ExecutionPolicy Bypass -File .\launcher\build-oc-launcher.ps1
 That build produces:
 
 - `launcher\dist\OpenCodeTailnetLauncher.exe`
-- `launcher\dist\OpenCodeTailnetLauncher-v0.0.12-single.zip`
+- `launcher\dist\OpenCodeTailnetLauncher-v0.1.1-single.zip`
 
 ## Security
 
@@ -151,7 +161,7 @@ This project is released under the MIT License. See `LICENSE`.
 
 Current version:
 
-- `v0.0.12`
+- `v0.1.1`
 
 Release notes:
 
@@ -168,3 +178,4 @@ Release notes:
 - `docs/RELEASE-v0.0.10.md`: relay-only history replay protection with background old-history deprioritization and improved priority observability
 - `docs/RELEASE-v0.0.11.md`: relay-only stabilization pass for fast-path launch, active-session freshness, idle/terminal protection, and response diagnostics
 - `docs/RELEASE-v0.0.12.md`: public sync to the modular final-experience baseline with launcher host/port injection and autogo defaults
+- `docs/RELEASE-v0.1.1.md`: relay-only active-session sync with inline session runtime and router-owned sync actions

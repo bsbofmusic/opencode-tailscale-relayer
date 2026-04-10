@@ -10,7 +10,7 @@ The router does three jobs:
 2. Inspect the remote OpenCode instance over the tailnet.
 3. Seed browser-side project history before redirecting into the real session route.
 
-The public repo now ships the same modular router baseline as the local stable setup: disk cache recovery, background watcher refresh, SSE events, and offline-ready cache fallback all live under `router/` while the entry file path stays `router/vps-opencode-router.js`.
+The public repo now ships the same modular router baseline as the local stable setup: disk cache recovery, background watcher refresh, SSE events, offline-ready cache fallback, and active-session sync all live under `router/` while the entry file path stays `router/vps-opencode-router.js`.
 
 ## Prerequisites
 
@@ -46,6 +46,8 @@ The router works with these environment variables:
 
 The provided templates already use those defaults.
 
+`v0.1.1` does not add a new external runtime file to deploy. The session sync runtime is injected inline into session HTML by the router itself.
+
 ## Deploy Steps
 
 1. Install Node.js 18+ and `nginx` on the VPS.
@@ -79,7 +81,7 @@ Check the local router process:
 
 ```bash
 sudo systemctl status opencode-router.service
-curl http://127.0.0.1:33102/__landing
+curl http://127.0.0.1:33102/
 ```
 
 Check the public endpoint:
@@ -91,8 +93,88 @@ curl -I https://your-domain.example.com/
 Expected result:
 
 - `opencode-router.service` is `active (running)`
-- `http://127.0.0.1:33102/__landing` returns HTML
+- `http://127.0.0.1:33102/` returns HTML
 - the public domain answers over HTTPS
+
+These checks are only preflight. They do not prove the browser exits the launch gate.
+
+## Pre-Ship Gate
+
+Do not ship based only on `curl`, `node --check`, or sandbox output.
+
+The hard gate is a real browser run against the live VPS route.
+
+Prerequisite on the machine running the gate:
+
+- Node.js
+- Playwright available either as an installed Node module or through `PLAYWRIGHT_NODE_PATH`
+- Chromium installed for Playwright, for example `npx playwright install chromium`
+
+Run from the public repo root:
+
+```powershell
+$env:TAILNET_ROUTER_URL="https://your-domain.example.com"
+$env:TAILNET_TARGET_HOST="100.x.x.x"
+$env:TAILNET_TARGET_PORT="3000"
+$env:TAILNET_VERIFY_PROFILES="desktop,mobile"
+node .\verify-launch-gate.js
+```
+
+```bash
+export TAILNET_ROUTER_URL="https://your-domain.example.com"
+export TAILNET_TARGET_HOST="100.x.x.x"
+export TAILNET_TARGET_PORT="3000"
+export TAILNET_VERIFY_PROFILES="desktop,mobile"
+node ./verify-launch-gate.js
+```
+
+The command must exit `0` on both profiles before release.
+
+For local debugging only, you may temporarily run a single profile by adding `TAILNET_REQUIRE_BOTH_PROFILES=0`.
+
+Hard failure conditions:
+
+- the browser stays on `/__oc/launch` beyond the gate timeout
+- the browser falls into a `stuck-progress-loop` where `/__oc/progress` keeps returning `200` but the page never leaves launch
+- the page never reaches a `/session/` route
+- the launch page ends in `Target is online but has no historical sessions`
+- the launch page ends in timeout or warm-failed state
+
+Evidence is written to the OS temp directory unless `TAILNET_EVIDENCE_DIR` is set.
+
+If Playwright is installed in a non-standard location, set:
+
+```powershell
+$env:PLAYWRIGHT_NODE_PATH="C:\path\to\node_modules\playwright"
+```
+
+If you know a stable success marker on the session page, strengthen the gate further with:
+
+```powershell
+$env:TAILNET_EXPECT_BODY_REGEX="OpenCode|Tailnet live"
+```
+
+## 0.1.1 Sync Verify
+
+Check the session route headers:
+
+```bash
+curl -s -D - -o /dev/null "https://your-domain.example.com/<encoded-dir>/session/<session-id>?host=100.x.x.x&port=3000"
+```
+
+Expected additional headers on session HTML responses:
+
+- `X-OC-Relay-Sync-State`
+- `X-OC-Relay-Action`
+
+Check multi-terminal sync behavior:
+
+1. Open one session through the router.
+2. Advance the same session from another terminal.
+3. Confirm the open page shows relay-owned sync state instead of silently drifting.
+4. Confirm `/__oc/healthz` exposes stale or protected client counts when applicable.
+
+This section is secondary. The release gate comes first: if `verify-launch-gate.js` fails, the build is not shippable even if headers and sync state endpoints look healthy.
 
 ## Typical Flow
 

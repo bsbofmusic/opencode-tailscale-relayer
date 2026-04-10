@@ -130,20 +130,27 @@ function landingPage(target) {
       return { host: ip, port: p }
     }
     function renderMeta(data) {
+      function esc(value) {
+        return String(value || '')
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+      }
       const healthOk = data.health && data.health.ok
       const sessionsOk = data.sessions && data.sessions.ok
-      const healthText = healthOk ? '<span class="ok">healthy</span>' : '<span class="bad">' + (data.health && data.health.error ? data.health.error : 'unreachable') + '</span>'
-      const versionText = data.health && data.health.version ? data.health.version : 'unknown'
+      const healthText = healthOk ? '<span class="ok">healthy</span>' : '<span class="bad">' + esc(data.health && data.health.error ? data.health.error : 'unreachable') + '</span>'
+      const versionText = esc(data.health && data.health.version ? data.health.version : 'unknown')
       const latencyText = data.health && typeof data.health.latencyMs === 'number' ? data.health.latencyMs + ' ms' : 'n/a'
-      const latestTitle = sessionsOk && data.sessions.latest ? (data.sessions.latest.title || data.sessions.latest.id || 'none') : 'none'
-      const latestDir = sessionsOk && data.sessions.latest ? data.sessions.latest.directory : 'none'
+      const latestTitle = esc(sessionsOk && data.sessions.latest ? (data.sessions.latest.title || data.sessions.latest.id || 'none') : 'none')
+      const latestDir = esc(sessionsOk && data.sessions.latest ? data.sessions.latest.directory : 'none')
       const cacheText = data.cache && data.cache.cachedAt ? new Date(data.cache.cachedAt).toLocaleTimeString() : 'n/a'
       const directories = sessionsOk && Array.isArray(data.sessions.directories) && data.sessions.directories.length
-        ? '<ul>' + data.sessions.directories.map(function (item) { return '<li><code>' + item + '</code></li>' }).join('') + '</ul>'
-        : '<div class="bad">' + (data.sessions && data.sessions.error ? data.sessions.error : 'No restoreable directories found') + '</div>'
+        ? '<ul>' + data.sessions.directories.map(function (item) { return '<li><code>' + esc(item) + '</code></li>' }).join('') + '</ul>'
+        : '<div class="bad">' + esc(data.sessions && data.sessions.error ? data.sessions.error : 'No restoreable directories found') + '</div>'
       meta.innerHTML = ''
-        + '<div class="line"><span class="k">Target</span><code>' + data.target.host + ':' + data.target.port + '</code></div>'
-        + '<div class="line"><span class="k">Source</span><code>' + ((data.source && data.source.label) || 'Global CLI service') + '</code></div>'
+        + '<div class="line"><span class="k">Target</span><code>' + esc(data.target.host) + ':' + esc(data.target.port) + '</code></div>'
+        + '<div class="line"><span class="k">Source</span><code>' + esc((data.source && data.source.label) || 'Global CLI service') + '</code></div>'
         + '<div class="line"><span class="k">CLI Version</span><code>' + versionText + '</code></div>'
         + '<div class="line"><span class="k">Health</span>' + healthText + '<span class="k">Latency</span><code>' + latencyText + '</code></div>'
         + '<div class="line"><span class="k">Latest Session</span><code>' + latestTitle + '</code></div>'
@@ -419,8 +426,55 @@ function launchPage(target, clientID, initial) {
 </html>`
 }
 
+function sessionSyncRuntime() {
+  return `<script id="oc-tailnet-sync-runtime">;(() => {
+    if (window.__ocTailnetSync) return
+    window.__ocTailnetSync = true
+    const key = 'oc-tailnet-sync:last-reload'
+    const params = new URLSearchParams(location.search)
+    const query = (path) => {
+      const next = new URLSearchParams(location.search)
+      const text = next.toString()
+      return text ? path + '?' + text : path
+    }
+    const chip = document.createElement('div')
+    chip.id = 'oc-tailnet-sync-chip'
+    chip.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:2147483647;padding:8px 10px;border-radius:999px;background:#08111d;color:#eef4ff;border:1px solid #20314b;box-shadow:0 8px 24px rgba(0,0,0,.35);font:12px/1.2 Inter,Segoe UI,sans-serif'
+    const paint = (state, reason) => { chip.textContent = reason ? 'Tailnet ' + state + ': ' + reason : 'Tailnet ' + state }
+    const mount = () => { if (!document.body.contains(chip)) document.body.appendChild(chip) }
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', mount, { once: true })
+    else mount()
+    const act = async () => {
+      const res = await fetch(query('/__oc/progress'), { credentials: 'same-origin', cache: 'no-store' })
+      const data = await res.json()
+      paint(data.syncState || 'live', data.staleReason || '')
+      if (data.lastAction === 'soft-refresh' && data.syncState === 'stale') {
+        const last = Number(sessionStorage.getItem(key) || '0')
+        if (Date.now() - last > 1500) {
+          sessionStorage.setItem(key, String(Date.now()))
+          location.replace(location.pathname + location.search)
+        }
+        return
+      }
+      if (data.lastAction === 're-enter' && data.launch) {
+        location.replace('/' + data.launch.directory + '/session/' + encodeURIComponent(data.launch.sessionID)
+          + '?host=' + encodeURIComponent(data.target.host)
+          + '&port=' + encodeURIComponent(data.target.port)
+          + '&client=' + encodeURIComponent(data.launch.client))
+      }
+    }
+    const stream = new EventSource(query('/__oc/events'))
+    stream.addEventListener('sync-stale', () => { void act() })
+    stream.addEventListener('target-health-changed', () => { void act() })
+    window.addEventListener('focus', () => { void act() })
+    setInterval(() => { void act() }, 1500)
+    void act()
+  })();</script>`
+}
+
 module.exports = {
   sessionTimeoutPage,
   landingPage,
   launchPage,
+  sessionSyncRuntime,
 }
