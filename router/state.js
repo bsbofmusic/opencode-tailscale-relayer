@@ -1,6 +1,6 @@
 "use strict"
 
-const { validClient, keyFor, now, fresh } = require("./util")
+const { validClient, keyFor, now, fresh, targetType } = require("./util")
 
 const sharedClientID = "_shared"
 
@@ -25,6 +25,15 @@ function emptyHead() {
 function createState(target) {
   return {
     target,
+    targetKey: keyFor(target),
+    targetType: "attach-only",
+    targetStatus: "unknown",
+    admission: "probe",
+    availabilityAt: 0,
+    failureReason: null,
+    failureCount: 0,
+    backoffUntil: 0,
+    lastFailureAt: 0,
     config: undefined,
     clients: new Map(),
     latestHead: emptyHead(),
@@ -162,6 +171,15 @@ function syncAction(state, client) {
   return "soft-refresh"
 }
 
+function targetAdmission(state) {
+  if (state.offline) {
+    return state.targetType === "launcher-managed" ? "launcher-managed-unavailable" : "attach-only-unavailable"
+  }
+  if (state.meta?.ready) return "enter"
+  if (state.meta && !state.meta.ready) return "no-session"
+  return "probe"
+}
+
 function syncClientView(state, client) {
   const latest = state.meta?.sessions?.latest
   if (!client.view && latest?.id && latest?.directory) {
@@ -262,11 +280,15 @@ function ensureState(states, target, config) {
   const hit = states.get(key)
   if (hit) {
     hit.config = cfg
+    hit.targetType = targetType(target, cfg)
+    hit.admission = targetAdmission(hit)
     touchState(hit)
     return hit
   }
   const next = createState(target)
   next.config = cfg
+  next.targetType = targetType(target, cfg)
+  next.admission = targetAdmission(next)
   next.onResume = (s) => {
     const { drainHeavy, pumpBackground } = require("./heavy")
     drainHeavy(s)
@@ -390,6 +412,7 @@ module.exports = {
   setClientHeads,
   setSyncState,
   syncAction,
+  targetAdmission,
   syncClientView,
   warmBusy,
   setLastReason,

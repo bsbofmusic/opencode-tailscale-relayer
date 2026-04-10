@@ -35,6 +35,10 @@ function createRouter(options) {
     idleRecoveryWindowMs: Number(process.env.OPENCODE_ROUTER_IDLE_RECOVERY_WINDOW_MS || "30000"),
     recoveryRetryMs: Number(process.env.OPENCODE_ROUTER_RECOVERY_RETRY_MS || "1500"),
     recoveryHtmlTimeoutMs: Number(process.env.OPENCODE_ROUTER_RECOVERY_HTML_TIMEOUT_MS || "15000"),
+    launcherHosts: String(process.env.OPENCODE_ROUTER_LAUNCHER_HOSTS || "")
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean),
     ...opts.config,
   }
 

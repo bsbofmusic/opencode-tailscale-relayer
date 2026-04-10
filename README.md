@@ -19,15 +19,16 @@ The result is a mobile-friendly public entrypoint that does not need the OpenCod
 - Active-session sync on the already-open session page
 - Inline router-owned sync runtime injected into session HTML only
 - Safe sync actions: `noop`, `soft-refresh`, `defer`, `re-enter`
+- Multi-target relayer model with `launcher-managed` and `attach-only` targets
 - Modular router runtime with disk-backed cache recovery, background watch refresh, SSE progress/events, and offline-ready fallback behavior
 
 ## Architecture
 
 1. `OpenCodeTailnetLauncher.exe` runs on a Windows machine already inside your tailnet.
 2. The launcher detects the machine's current `100.x.x.x` Tailscale address.
-3. If `opencode web` is missing or unhealthy, it starts it again with the configured port and CORS origin.
+3. If `opencode web` is missing or unhealthy on the launcher-managed machine, it starts it again with the configured port and CORS origin.
 4. A VPS-hosted router receives public browser traffic.
-5. The router probes the remote OpenCode server, reads the latest sessions, writes the required browser-side project state, and redirects into the exact session route.
+5. The router probes the remote OpenCode server, classifies the target as `launcher-managed` or `attach-only`, reads the latest sessions, writes the required browser-side project state, and redirects into the exact session route.
 6. After that handoff, the router continues to coordinate active-session freshness through router-side state, SSE events, and session-page sync actions.
 
 ## Repo Layout
@@ -113,6 +114,8 @@ Core routes:
 - `GET /__oc/healthz`: lightweight router/cache health summary
 - all other paths: proxied through to the remote OpenCode web server
 
+The relayer owns target typing. A `launcher-managed` target is the one machine allowed to auto-start the official CLI through the launcher. An `attach-only` target can be probed and entered if already serving OpenCode web, but is never remotely started or controlled.
+
 This is what fixes the common first-load problem where a fresh browser or mobile device does not show historical sessions.
 
 From `v0.1.1` onward, the router also closes the post-launch stale-page gap: it can mark the current session page stale, choose a safe action, and keep the open page aligned without patching upstream `opencode`.
@@ -128,7 +131,7 @@ Detailed steps are in `docs/DEPLOY_VPS.md`.
 
 The nginx example proxies `/` to the router landing page and forwards every other request to the same local router service.
 
-Pre-ship rule: do not treat syntax checks and sandbox checks as release evidence by themselves. The release gate is a real browser run through `node .\verify-launch-gate.js` against the live router URL and target host.
+Pre-ship rule: do not treat syntax checks and sandbox checks as release evidence by themselves. The release gate is a real browser run through `node .\verify-launch-gate.js` against the live router URL and target host, and it must pass for both `desktop` and `mobile`.
 
 If Playwright is not resolvable from the current Node environment, provide `PLAYWRIGHT_NODE_PATH` to the installed Playwright module path.
 Install the Chromium browser for Playwright before using the gate.
@@ -179,3 +182,4 @@ Release notes:
 - `docs/RELEASE-v0.0.11.md`: relay-only stabilization pass for fast-path launch, active-session freshness, idle/terminal protection, and response diagnostics
 - `docs/RELEASE-v0.0.12.md`: public sync to the modular final-experience baseline with launcher host/port injection and autogo defaults
 - `docs/RELEASE-v0.1.1.md`: relay-only active-session sync with inline session runtime and router-owned sync actions
+- `docs/RELEASE-v0.1.2.md`: official-OpenCode-only relayer with target typing, admission states, and browser-gated delivery

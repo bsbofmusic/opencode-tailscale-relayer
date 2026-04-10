@@ -2,7 +2,7 @@
 
 const http = require("http")
 const { now, fresh, uniqueDirectories, classifyError, cacheKey } = require("./util")
-const { setWarm, warmBusy, setLastReason, touchState } = require("./state")
+const { setWarm, warmBusy, setLastReason, touchState, targetAdmission } = require("./state")
 const { runHeavy, enqueueBackground } = require("./heavy")
 const { saveStateCache } = require("./sync/disk-cache")
 
@@ -130,6 +130,19 @@ function buildMeta(target, health, list, latencyMs, config) {
   }
 }
 
+function metaEnvelope(state) {
+  return {
+    ...state.meta,
+    targetType: state.targetType,
+    targetStatus: state.targetStatus,
+    admission: state.admission,
+    availabilityAt: state.availabilityAt,
+    failureReason: state.failureReason,
+    failureCount: state.failureCount,
+    backoffUntil: state.backoffUntil,
+  }
+}
+
 function buildList(list, directory, limit) {
   return list.filter((item) => item?.directory === directory).slice(0, limit)
 }
@@ -189,6 +202,12 @@ function settleWarm(state, client, note) {
 function failWarm(state, client, err, fallback) {
   const message = classifyError(err, fallback)
   state.lastError = message
+  state.failureReason = message
+  state.targetStatus = state.offline ? "offline" : "error"
+  state.failureCount += 1
+  state.lastFailureAt = now()
+  state.backoffUntil = state.meta ? now() + Math.min(15000, state.failureCount * 2000) : 0
+  state.admission = targetAdmission(state)
   setLastReason(state, client, fallback.toLowerCase().replace(/[^a-z0-9]+/g, "-"))
   client.lastError = message
   if (state.meta?.ready) {
@@ -324,6 +343,7 @@ async function warm(state, client, force, options, config) {
     return state.promise
   }
   if (!force && fresh(state.metaAt, cfg.metaCacheMs) && state.meta) return Promise.resolve(state.meta)
+  if (!force && state.backoffUntil && state.backoffUntil > now() && state.meta) return Promise.resolve(state.meta)
   const target = state.target
   const body = async () => {
     setWarm(client, {
@@ -339,11 +359,14 @@ async function warm(state, client, force, options, config) {
       health = await fetchJson(target, "/global/health", config)
       state.offline = false
       state.offlineReason = null
+      state.targetStatus = health.data?.healthy === true ? "healthy" : "unhealthy"
+      state.failureReason = null
+      state.availabilityAt = now()
     } catch (err) {
       state.offline = true
       state.offlineReason = err.message
       if (failWarm(state, client, err, "Health check failed")) throw err
-      return state.meta
+      return metaEnvelope(state)
     }
     setWarm(client, { percent: 28, stage: "index", note: "Reading remote session index..." })
     let sessions
@@ -351,15 +374,26 @@ async function warm(state, client, force, options, config) {
       sessions = await fetchJsonWith(target, `/session?limit=${cfg.maxSessions}`, { heavy: true, state }, config)
       state.offline = false
       state.offlineReason = null
+      state.targetStatus = "healthy"
+      state.failureReason = null
+      state.availabilityAt = now()
     } catch (err) {
       state.offline = true
       state.offlineReason = err.message
       if (failWarm(state, client, err, "Session scan failed")) throw err
-      return state.meta
+      return metaEnvelope(state)
     }
     state.sessionList = Array.isArray(sessions.data) ? sessions.data : []
     state.meta = buildMeta(target, health.data, state.sessionList, health.latencyMs, config)
     state.metaAt = now()
+    state.targetStatus = state.meta.ready ? "ready" : "no-session"
+    state.failureReason = state.meta.ready ? null : state.meta.sessions.error
+    state.admission = targetAdmission(state)
+    if (state.meta.ready) {
+      state.failureCount = 0
+      state.backoffUntil = 0
+      state.availabilityAt = now()
+    }
     for (const dir of uniqueDirectories(state.sessionList, cfg.maxProjects)) rememberList(state, dir, 55)
     saveStateCache(state, config)
     if (!state.meta.ready) {
@@ -396,7 +430,7 @@ async function warm(state, client, force, options, config) {
     scheduleSnapshotWarm(state, client, target, latestSession, nearby, config)
     state.meta.cache = { source: "router", cachedAt: now(), warm: true }
     saveStateCache(state, config)
-    return state.meta
+    return metaEnvelope(state)
   }
   const run = Promise.race([
     body(),
@@ -404,7 +438,7 @@ async function warm(state, client, force, options, config) {
   ])
     .catch((err) => {
       if (failWarm(state, client, err, "Warm refresh failed")) throw err
-      return state.meta
+      return metaEnvelope(state)
     })
     .finally(() => {
       state.promise = undefined
@@ -433,6 +467,7 @@ module.exports = {
   fetchJson,
   fetchJsonWith,
   buildMeta,
+  metaEnvelope,
   buildList,
   rememberList,
   cacheMessages,

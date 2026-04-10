@@ -65,6 +65,11 @@ function keyFor(target) {
   return `${target.host}:${target.port}`
 }
 
+function targetType(target, config) {
+  const hosts = config?.launcherHosts || []
+  return hosts.includes(target.host) ? "launcher-managed" : "attach-only"
+}
+
 function now() {
   return Date.now()
 }
@@ -142,6 +147,7 @@ module.exports = {
   decodeDir,
   parseTarget,
   keyFor,
+  targetType,
   now,
   fresh,
   cacheKey,

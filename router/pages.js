@@ -150,6 +150,8 @@ function landingPage(target) {
         : '<div class="bad">' + esc(data.sessions && data.sessions.error ? data.sessions.error : 'No restoreable directories found') + '</div>'
       meta.innerHTML = ''
         + '<div class="line"><span class="k">Target</span><code>' + esc(data.target.host) + ':' + esc(data.target.port) + '</code></div>'
+        + '<div class="line"><span class="k">Type</span><code>' + esc(data.targetType || 'attach-only') + '</code></div>'
+        + '<div class="line"><span class="k">Admission</span><code>' + esc(data.admission || 'probe') + '</code></div>'
         + '<div class="line"><span class="k">Source</span><code>' + esc((data.source && data.source.label) || 'Global CLI service') + '</code></div>'
         + '<div class="line"><span class="k">CLI Version</span><code>' + versionText + '</code></div>'
         + '<div class="line"><span class="k">Health</span>' + healthText + '<span class="k">Latency</span><code>' + latencyText + '</code></div>'
@@ -308,6 +310,12 @@ function launchPage(target, clientID, initial) {
         + '&port=' + encodeURIComponent(target.port)
         + '&client=' + encodeURIComponent(target.client)
     }
+    function handoffUrl() {
+      return '/__oc/launch?host=' + encodeURIComponent(target.host)
+        + '&port=' + encodeURIComponent(target.port)
+        + '&client=' + encodeURIComponent(target.client)
+        + '&handoff=1'
+    }
     function reveal(launch) {
       if (!launch) return
       cachedLaunch = launch
@@ -315,11 +323,11 @@ function launchPage(target, clientID, initial) {
     }
     function go(launch) {
       reveal(launch)
-      location.replace(nextUrl(launch))
+      location.assign(handoffUrl())
     }
     fallback.addEventListener('click', function () {
       if (!cachedLaunch) return
-      location.replace(nextUrl(cachedLaunch))
+      location.assign(handoffUrl())
     })
     function serverKeys() {
       const keys = [origin]
@@ -357,6 +365,13 @@ function launchPage(target, clientID, initial) {
       }
       return map[value] || 'Preparing...'
     }
+    function explain(data) {
+      if (data.admission === 'launcher-managed-unavailable') return 'Launcher-managed target is reachable, but OpenCode is not ready there yet.'
+      if (data.admission === 'attach-only-unavailable') return 'Attach-only target is not currently serving OpenCode web.'
+      if (data.admission === 'no-session') return 'Target is online, but there is no restoreable historical session yet.'
+      if (data.failureReason) return data.failureReason
+      return data.warm && data.warm.note ? data.warm.note : 'Preparing...'
+    }
     stage.textContent = 'Connecting to remote OpenCode...'
     note.textContent = 'Reading the VPS launch state...'
     async function tick() {
@@ -376,19 +391,19 @@ function launchPage(target, clientID, initial) {
       retryAfter = Math.max(450, Number(data.retryAfterMs || 450))
       fill.style.width = Math.max(4, data.warm && data.warm.percent ? data.warm.percent : 4) + '%'
       stage.textContent = label(data.warm && data.warm.stage)
-      note.textContent = data.warm && data.warm.note ? data.warm.note : 'Preparing...'
+      note.textContent = explain(data)
       if (!res.ok) throw new Error(data.error || ('Request failed: ' + res.status))
-      if (data.launchReady && data.launch) {
-        reveal(data.launch)
-        if (data.meta) seed(data.meta)
-        stage.textContent = 'Ready. Opening the session...'
-        note.textContent = data.resumeSafeMode ? 'Recovery-safe mode is on. The VPS will enter gently.' : 'The VPS has prepared the session. Entering now...'
-        const minVisible = 180
+        if (data.launchReady && data.launch) {
+          reveal(data.launch)
+          if (data.meta) seed(data.meta)
+          stage.textContent = 'Ready. Opening the session...'
+          note.textContent = data.resumeSafeMode ? 'Recovery-safe mode is on. The VPS will enter gently.' : 'The VPS has prepared the session. Entering now...'
+          const minVisible = 180
         const delay = Math.max(0, minVisible - (Date.now() - shownAt))
         if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay))
-        go(data.launch)
-        return true
-      }
+          go(data.launch)
+          return true
+        }
       if (polls % 12 === 0) {
         const metaResult = await fetchJson('/__oc/meta?host=' + encodeURIComponent(target.host) + '&port=' + encodeURIComponent(target.port) + '&client=' + encodeURIComponent(target.client), 4000)
         const metaRes = metaResult.res

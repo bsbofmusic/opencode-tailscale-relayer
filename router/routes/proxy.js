@@ -49,7 +49,6 @@ function proxyRequest(ctx, req, res) {
     delete options.headers["content-length"]
     const upstream = http.request(options, (up) => {
       if (finished) return
-      finished = true
       const headers = { ...up.headers }
       const dir = requestDirectory(client, reqUrl)
       const msg = reqUrl.pathname.match(/^\/session\/([^/]+)\/message$/)
@@ -65,6 +64,7 @@ function proxyRequest(ctx, req, res) {
       const canStore = guardHtml || (req.method === "GET" && dir && !reqUrl.searchParams.has("cursor") && ((msg && (limit === 80 || limit === 200)) || reqUrl.pathname === "/session" || /^\/session\/[^/]+$/.test(reqUrl.pathname)))
 
       if (!canStore) {
+        finished = true
         if (guardHtml && (up.statusCode || 0) >= 200 && (up.statusCode || 0) < 300) rememberActiveSession(client, reqUrl)
         if ((up.statusCode || 0) >= 200 && (up.statusCode || 0) < 300) clearLastReason(state, client)
         res.writeHead(up.statusCode || 502, headers)
@@ -75,6 +75,8 @@ function proxyRequest(ctx, req, res) {
       const chunks = []
       up.on("data", (chunk) => chunks.push(chunk))
       up.on("end", () => {
+        if (finished) return
+        finished = true
         const status = up.statusCode || 502
         let body = Buffer.concat(chunks).toString("utf8")
         const ok = status >= 200 && status < 300

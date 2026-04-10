@@ -2,8 +2,8 @@
 
 const { json, withRelay, relayHeaders } = require("../http")
 const { launchPage } = require("../pages")
-const { clientSafeMode, clearLastReason, setLastReason, warmBusy, backgroundWarmPaused, syncAction, syncClientView } = require("../state")
-const { syncWarm, warm, refresh } = require("../warm")
+const { clientSafeMode, clearLastReason, setLastReason, warmBusy, backgroundWarmPaused, syncAction, syncClientView, targetAdmission } = require("../state")
+const { syncWarm, warm, refresh, metaEnvelope } = require("../warm")
 const { classifyError, encodeDir } = require("../util")
 const { targetCookie } = require("../context")
 const { subscribeTarget } = require("../sync/bus")
@@ -16,9 +16,14 @@ function clearTargetCookie(res) {
   res.setHeader("Set-Cookie", `${targetCookie}=; Path=/; Max-Age=0; SameSite=Lax`)
 }
 
+function handoffLocation(target, launch) {
+  return `/${launch.directory}/session/${encodeURIComponent(launch.sessionID)}?host=${encodeURIComponent(target.host)}&port=${encodeURIComponent(target.port)}&client=${encodeURIComponent(launch.client)}`
+}
+
 function progressPayload(state, client) {
   syncWarm(state, client)
   syncClientView(state, client)
+  state.admission = targetAdmission(state)
   const launchReady = Boolean(state.meta?.ready && state.meta?.sessions?.latest?.id && state.meta?.sessions?.latest?.directory)
   const launchTarget = client.view?.sessionID && client.view?.directory
     ? { id: client.view.sessionID, directory: client.view.directory }
@@ -34,6 +39,12 @@ function progressPayload(state, client) {
   }
   const payload = {
     target: state.target,
+    targetType: state.targetType,
+    targetStatus: state.targetStatus,
+    admission: state.admission,
+    failureReason: state.failureReason,
+    failureCount: state.failureCount,
+    backoffUntil: state.backoffUntil,
     ready: client.warm.ready && Boolean(state.meta?.ready),
     launchReady,
     refreshing,
@@ -95,10 +106,18 @@ function healthPayload(states) {
   const { syncClients } = require("../warm")
   const summary = [...states.values()].map((state) => {
     syncClients(state)
+    state.admission = targetAdmission(state)
     const staleClients = [...state.clients.values()].filter((client) => client.syncState === "stale").length
     const protectedClients = [...state.clients.values()].filter((client) => syncAction(state, client) === "defer").length
     return {
       target: state.target,
+      targetType: state.targetType,
+      targetStatus: state.targetStatus,
+      admission: state.admission,
+      availabilityAt: state.availabilityAt,
+      failureReason: state.failureReason,
+      failureCount: state.failureCount,
+      backoffUntil: state.backoffUntil,
       launchReady: Boolean(state.meta?.ready && state.meta?.sessions?.latest?.id),
       refreshing: warmBusy(state),
       snapshotCount: Math.max(0, ...[...state.clients.values()].map((c) => c.warm.snapshotCount || 0)),
@@ -148,7 +167,7 @@ async function resolveLaunch(state, client, snapshotCount, config) {
 }
 
 function handleControl(ctx, req, res, states) {
-  const { state, client, target, wantCookie, config } = ctx
+  const { state, client, target, wantCookie, config, reqUrl } = ctx
 
   if (ctx.controlRoute === "/clear") {
     clearTargetCookie(res)
@@ -188,7 +207,7 @@ function handleControl(ctx, req, res, states) {
   if (ctx.controlRoute === "/meta") {
     const run = async () => {
       try {
-        const meta = state.meta && state.meta.ready ? state.meta : await warm(state, client, false, { snapshotCount }, config)
+        const meta = state.meta && state.meta.ready ? metaEnvelope(state) : await warm(state, client, false, { snapshotCount }, config)
         refresh(state, client, config)
         clearLastReason(state, client)
         const cookieHeader = wantCookie ? { "Set-Cookie": `${targetCookie}=${target.host}:${target.port}; Path=/; Max-Age=2592000; SameSite=Lax` } : undefined
@@ -205,6 +224,13 @@ function handleControl(ctx, req, res, states) {
   if (ctx.controlRoute === "/launch") {
     const run = async () => {
       const payload = await resolveLaunch(state, client, snapshotCount, config)
+      if (reqUrl.searchParams.get("handoff") === "1" && payload.launchReady && payload.launch) {
+        if (wantCookie) setTargetCookie(res, target)
+        clearLastReason(state, client)
+        res.writeHead(303, withRelay({ Location: handoffLocation(target, payload.launch), "Cache-Control": "no-store" }, "foreground", "control", "launch-handoff"))
+        res.end()
+        return
+      }
       if (wantCookie) setTargetCookie(res, target)
       clearLastReason(state, client)
       res.writeHead(200, withRelay(
@@ -230,4 +256,5 @@ module.exports = {
   healthPayload,
   resolveLaunch,
   handleEvents,
+  handoffLocation,
 }

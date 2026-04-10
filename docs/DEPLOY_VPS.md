@@ -10,6 +10,8 @@ The router does three jobs:
 2. Inspect the remote OpenCode instance over the tailnet.
 3. Seed browser-side project history before redirecting into the real session route.
 
+From `v0.1.2` onward, the router also classifies the target as `launcher-managed` or `attach-only` and reports that admission truth through `progress` and `healthz`.
+
 The public repo now ships the same modular router baseline as the local stable setup: disk cache recovery, background watcher refresh, SSE events, offline-ready cache fallback, and active-session sync all live under `router/` while the entry file path stays `router/vps-opencode-router.js`.
 
 ## Prerequisites
@@ -43,6 +45,7 @@ The router works with these environment variables:
 - `OPENCODE_ROUTER_PORT`: bind port, default `33102`
 - `OPENCODE_ROUTER_CACHE_DIR`: optional disk cache directory for offline recovery
 - `OPENCODE_ROUTER_WATCH_INTERVAL_MS`: optional watcher interval for background refresh and SSE updates
+- `OPENCODE_ROUTER_LAUNCHER_HOSTS`: comma-separated list of target hosts that are allowed to be launcher-managed
 
 The provided templates already use those defaults.
 
@@ -137,6 +140,7 @@ Hard failure conditions:
 - the browser stays on `/__oc/launch` beyond the gate timeout
 - the browser falls into a `stuck-progress-loop` where `/__oc/progress` keeps returning `200` but the page never leaves launch
 - the page never reaches a `/session/` route
+- the page resolves into `attach-only-unavailable` or `launcher-managed-unavailable` for a target that should have been enterable
 - the launch page ends in `Target is online but has no historical sessions`
 - the launch page ends in timeout or warm-failed state
 
@@ -173,6 +177,12 @@ Check multi-terminal sync behavior:
 2. Advance the same session from another terminal.
 3. Confirm the open page shows relay-owned sync state instead of silently drifting.
 4. Confirm `/__oc/healthz` exposes stale or protected client counts when applicable.
+
+For `v0.1.2`, also confirm the relayer surfaces target typing clearly:
+
+1. `progress.targetType` is present.
+2. `progress.admission` is present.
+3. `healthz.states[*].targetType` and `healthz.states[*].admission` match the expected target policy.
 
 This section is secondary. The release gate comes first: if `verify-launch-gate.js` fails, the build is not shippable even if headers and sync state endpoints look healthy.
 

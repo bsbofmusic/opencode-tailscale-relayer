@@ -8,6 +8,7 @@ const { saveStateCache } = require("./disk-cache")
 async function tickWatcher(state, config) {
   if (state.watcherBusy || !state.meta?.ready || !state.clients.size) return
   if (state.promise) return
+  if (state.backoffUntil && state.backoffUntil > Date.now()) return
   state.watcherBusy = true
   const { fetchJson, fetchJsonWith, buildMeta, rememberList } = require("../warm")
   try {
@@ -95,6 +96,11 @@ async function tickWatcher(state, config) {
     const becameOffline = !state.offline
     state.offline = true
     state.offlineReason = err.message
+    state.failureReason = err.message
+    state.failureCount += 1
+    state.lastFailureAt = Date.now()
+    state.backoffUntil = state.meta ? Date.now() + Math.min(15000, state.failureCount * 2000) : 0
+    state.targetStatus = "offline"
     setLastReason(state, null, "watcher-offline")
     if (becameOffline) {
       for (const client of state.clients.values()) {

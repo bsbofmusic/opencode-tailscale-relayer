@@ -61,3 +61,4 @@ The browser gate is specifically meant to catch the failure mode where `__oc/pro
 
 - This release stays relay-only. No upstream `opencode` source changes are required.
 - The router now coordinates the open page after launch, not just the entry flow before launch.
+- `v0.1.2` supersedes this release as the formal relayer definition when official-OpenCode compatibility and target typing are required.

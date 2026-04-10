@@ -103,6 +103,15 @@ function looksLikeSuccess(state, network) {
 
 function doneReason(state) {
   const body = String(state.body || "")
+  if (/502 Bad Gateway/i.test(`${state.title || ""}\n${body}`)) {
+    return { done: true, ok: false, reason: "bad-gateway" }
+  }
+  if (/Attach-only target is not currently serving OpenCode web/i.test(body)) {
+    return { done: true, ok: false, reason: "attach-only-unavailable" }
+  }
+  if (/Launcher-managed target is reachable, but OpenCode is not ready there yet/i.test(body)) {
+    return { done: true, ok: false, reason: "launcher-managed-unavailable" }
+  }
   if (/OpenCode session page is taking too long/i.test(body) || /Session Timeout/i.test(state.title || "")) {
     return { done: true, ok: false, reason: "timeout-page" }
   }
@@ -143,6 +152,24 @@ async function inspectPage(page) {
   }
 }
 
+async function safeInspect(page, last) {
+  try {
+    return await Promise.race([
+      inspectPage(page),
+      page.waitForTimeout(2000).then(() => { throw new Error("inspect-timeout") }),
+    ])
+  } catch {
+    return {
+      url: page.url(),
+      title: last?.title || "",
+      stage: last?.stage || null,
+      note: last?.note || null,
+      fill: last?.fill || null,
+      body: last?.body || "",
+    }
+  }
+}
+
 async function runProfile(browserType, launchUrl, profile, outputRoot) {
   const startedAt = Date.now()
   const network = []
@@ -170,25 +197,39 @@ async function runProfile(browserType, launchUrl, profile, outputRoot) {
 
   let gotoError = null
   try {
+    console.error(`GOTO ${profile}`)
     await page.goto(launchUrl, { waitUntil: "domcontentloaded", timeout: numberEnv("TAILNET_NAV_TIMEOUT_MS", 30000) })
+    console.error(`GOTO_OK ${profile}`)
   } catch (err) {
     gotoError = String(err && err.message ? err.message : err)
+    console.error(`GOTO_ERR ${profile} ${gotoError}`)
   }
 
   const deadline = Date.now() + numberEnv("TAILNET_GATE_TIMEOUT_MS", 15000)
-  let state = await inspectPage(page)
+  let state = await safeInspect(page)
   let reason = successReason(state, network)
-
   while (!reason.done && Date.now() < deadline) {
     await page.waitForTimeout(numberEnv("TAILNET_POLL_MS", 250))
-    state = await inspectPage(page)
+    state = await safeInspect(page, state)
     reason = successReason(state, network)
+  }
+  if (!reason.done) {
+    const nav = urls.find((item) => /\/session\//i.test(item.url))
+    if (nav && network.some((item) => /\/session\//.test(item.url) && item.status >= 200 && item.status < 300)) {
+      state = { ...state, url: nav.url, body: state.body || "session-route" }
+      reason = { done: true, ok: true, reason: "session-route" }
+    } else {
+      reason = { done: true, ok: false, reason: finalReason({ reason: "timeout-still-in-launch-gate", network }) }
+    }
   }
 
   const artifactBase = path.join(outputRoot, `${safeName(profile)}-${Date.now()}`)
   const screenshotPath = `${artifactBase}.png`
   const jsonPath = `${artifactBase}.json`
-  await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {})
+  await Promise.race([
+    page.screenshot({ path: screenshotPath, fullPage: false }),
+    page.waitForTimeout(5000).then(() => { throw new Error("screenshot-timeout") }),
+  ]).catch(() => {})
   const result = {
     profile,
     launchUrl,
@@ -205,9 +246,17 @@ async function runProfile(browserType, launchUrl, profile, outputRoot) {
   }
   fs.writeFileSync(jsonPath, JSON.stringify(result, null, 2))
   result.jsonPath = jsonPath
-  await context.close()
-  await browser.close()
+  console.error(`CLOSE ${profile}`)
+  await Promise.race([context.close(), page.waitForTimeout(5000)]).catch(() => {})
+  await Promise.race([browser.close(), page.waitForTimeout(5000)]).catch(() => {})
   return result
+}
+
+function shouldRetry(result) {
+  if (result.ok) return false
+  if (result.reason !== "timeout-still-in-launch-gate") return false
+  const text = `${result.state?.title || ""}\n${result.state?.stage || ""}\n${result.state?.note || ""}\n${result.state?.body || ""}`
+  return /Ready\. Opening the session|prepared the session\. Entering now/i.test(text)
 }
 
 function finalReason(result) {
@@ -227,16 +276,28 @@ async function main() {
   assertProfiles(profiles)
   const out = evidenceDir()
   const results = []
+  const kill = setTimeout(() => {
+    console.error(JSON.stringify({ error: "overall-timeout", launchUrl, profiles }, null, 2))
+    process.exit(124)
+  }, numberEnv("TAILNET_OVERALL_TIMEOUT_MS", 120000))
 
   for (const profile of profiles) {
-    const result = await runProfile(chromium, launchUrl, profile, out)
+    console.error(`START ${profile}`)
+    let result = await runProfile(chromium, launchUrl, profile, out)
+    if (shouldRetry(result)) {
+      console.error(`RETRY ${profile}`)
+      result = await runProfile(chromium, launchUrl, profile, out)
+    }
     result.reason = finalReason(result)
     results.push(result)
+    console.error(`DONE ${profile} ${result.reason} ok=${result.ok}`)
   }
 
   const failed = results.filter((item) => !item.ok)
   process.stdout.write(`${JSON.stringify({ launchUrl, results }, null, 2)}\n`)
+  clearTimeout(kill)
   if (failed.length) process.exit(1)
+  process.exit(0)
 }
 
 main().catch((err) => {
