@@ -214,7 +214,12 @@ function handleControl(ctx, req, res, states) {
         json(res, 200, meta, withRelay(cookieHeader, "foreground", "control", clientSafeMode(client) ? "resume-safe-meta" : "meta"))
       } catch (err) {
         setLastReason(state, client, "target-inspection-failed")
-        json(res, 502, { error: classifyError(err, "Target inspection failed") }, relayHeaders("foreground", "error", "target-inspection-failed"))
+        state.offline = true
+        state.offlineReason = classifyError(err, "Target inspection failed")
+        state.failureReason = state.offlineReason
+        state.targetStatus = "offline"
+        state.admission = targetAdmission(state)
+        json(res, 200, metaEnvelope(state), relayHeaders("foreground", "fallback", "target-inspection-failed"))
       }
     }
     run()

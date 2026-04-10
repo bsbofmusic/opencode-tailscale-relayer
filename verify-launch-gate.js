@@ -103,6 +103,9 @@ function looksLikeSuccess(state, network) {
 
 function doneReason(state) {
   const body = String(state.body || "")
+  if (/401 Unauthorized|403 Forbidden|Basic realm|sign in|log in|login/i.test(`${state.title || ""}\n${body}`)) {
+    return { done: true, ok: false, reason: "auth-challenge" }
+  }
   if (/502 Bad Gateway/i.test(`${state.title || ""}\n${body}`)) {
     return { done: true, ok: false, reason: "bad-gateway" }
   }

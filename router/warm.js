@@ -131,8 +131,28 @@ function buildMeta(target, health, list, latencyMs, config) {
 }
 
 function metaEnvelope(state) {
+  const base = state.meta || {
+    target: state.target,
+    source: { kind: "cli", label: "Global CLI service" },
+    health: {
+      ok: false,
+      healthy: false,
+      version: null,
+      latencyMs: null,
+      error: state.failureReason || state.offlineReason || "Target inspection failed",
+    },
+    sessions: {
+      ok: false,
+      count: 0,
+      directories: [],
+      latest: null,
+      error: state.failureReason || state.offlineReason || "Target inspection failed",
+    },
+    ready: false,
+    cache: { source: "router", cachedAt: now(), warm: false },
+  }
   return {
-    ...state.meta,
+    ...base,
     targetType: state.targetType,
     targetStatus: state.targetStatus,
     admission: state.admission,
