@@ -40,6 +40,12 @@ These states appear through relayer surfaces rather than only through vague load
 
 The relayer now tracks target-level failure count and backoff timing so repeated failures stop thrashing the same target immediately.
 
+### Native session browsing restored
+
+The relayer no longer serves a stale 55-item roots-list fallback for larger session-list requests.
+
+This restores native OpenCode-style session browsing semantics so `Load more` can actually grow the visible list instead of replaying the same warmed snapshot.
+
 ## Validation
 
 Validated with:
@@ -52,8 +58,8 @@ Live browser gate evidence:
 
 - attach-only desktop: `ok=true`, `reason=session-route`, `durationMs=8177`
 - attach-only mobile: `ok=true`, `reason=session-route`, `durationMs=14084`
-- launcher-managed landing-flow desktop: `ok=true`, `reason=session-route`, `durationMs=6334`
-- launcher-managed landing-flow mobile: `ok=true`, `reason=session-route`, `durationMs=6379`
+- launcher-managed landing-flow desktop: `ok=true`, `reason=session-route`, `durationMs=7459`
+- launcher-managed landing-flow mobile: `ok=true`, `reason=session-route`, `durationMs=10086`
 
 The final gate now starts from the public landing page, validates the visible entry controls, triggers the same browser-side `Open` action a human uses, resolves the server-owned launch handoff, and verifies the pinned session route returns valid OpenCode HTML with `<title>OpenCode</title>`, `id="root"`, and the injected `oc-tailnet-sync-runtime` marker.
 

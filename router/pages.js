@@ -304,13 +304,11 @@ function launchPage(target, clientID, initial) {
         clearTimeout(timer)
       }
     }
-    function launchUrl() {
-      return '/__oc/launch?host=' + encodeURIComponent(target.host)
+    function nextUrl(launch) {
+      return '/' + launch.directory + '/session/' + encodeURIComponent(launch.sessionID)
+        + '?host=' + encodeURIComponent(target.host)
         + '&port=' + encodeURIComponent(target.port)
         + '&client=' + encodeURIComponent(target.client)
-    }
-    function requestServerEntry() {
-      location.replace(launchUrl())
     }
     function reveal(launch) {
       if (!launch) return
@@ -319,11 +317,11 @@ function launchPage(target, clientID, initial) {
     }
     function go(launch) {
       reveal(launch)
-      requestServerEntry()
+      location.replace(nextUrl(launch))
     }
     fallback.addEventListener('click', function () {
       if (!cachedLaunch) return
-      requestServerEntry()
+      location.replace(nextUrl(cachedLaunch))
     })
     function serverKeys() {
       const keys = [origin]
@@ -378,7 +376,7 @@ function launchPage(target, clientID, initial) {
       const minVisible = 180
       const delay = Math.max(0, minVisible - (Date.now() - shownAt))
       if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay))
-      requestServerEntry()
+      go(data.launch)
     }
     async function tick() {
       let res, data
@@ -403,12 +401,22 @@ function launchPage(target, clientID, initial) {
         reveal(data.launch)
         if (data.meta) seed(data.meta)
         stage.textContent = 'Ready. Opening the session...'
-        note.textContent = data.resumeSafeMode ? 'Recovery-safe mode is on. The VPS will enter gently.' : 'The relayer has prepared the session. Handing off now...'
+        note.textContent = data.resumeSafeMode ? 'Recovery-safe mode is on. The VPS will enter gently.' : 'The VPS has prepared the session. Entering now...'
         const minVisible = 180
         const delay = Math.max(0, minVisible - (Date.now() - shownAt))
         if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay))
-        requestServerEntry()
+        go(data.launch)
         return true
+      }
+      if (polls % 12 === 0) {
+        const metaResult = await fetchJson('/__oc/meta?host=' + encodeURIComponent(target.host) + '&port=' + encodeURIComponent(target.port) + '&client=' + encodeURIComponent(target.client), 4000)
+        const metaRes = metaResult.res
+        const meta = metaResult.data
+        if (metaRes.ok && meta && meta.ready && meta.sessions && meta.sessions.latest) {
+          seed(meta)
+          go({ directory: encodeDir(meta.sessions.latest.directory), sessionID: meta.sessions.latest.id })
+          return true
+        }
       }
       return false
     }
@@ -428,7 +436,7 @@ function launchPage(target, clientID, initial) {
             fallback.hidden = false
             note.textContent += ' You can open the cached session now.'
             await new Promise((resolve) => setTimeout(resolve, 1500))
-            requestServerEntry()
+            location.replace(nextUrl(cachedLaunch))
             return
           }
         }
