@@ -86,13 +86,18 @@ function latest(items) {
   return [...items].sort((a, b) => (b.time?.updated ?? b.time?.created ?? 0) - (a.time?.updated ?? a.time?.created ?? 0))[0]
 }
 
+function dirKey(value) {
+  return String(value || '').replace(/\\+/g, '\\').toLowerCase()
+}
+
 function uniqueDirectories(items, maxProjects) {
   const seen = new Set()
   return items
     .map((item) => item?.directory)
     .filter((dir) => {
-      if (!dir || seen.has(dir)) return false
-      seen.add(dir)
+      const key = dirKey(dir)
+      if (!dir || seen.has(key)) return false
+      seen.add(key)
       return true
     })
     .slice(0, maxProjects)
@@ -152,6 +157,7 @@ module.exports = {
   fresh,
   cacheKey,
   latest,
+  dirKey,
   uniqueDirectories,
   classifyError,
   isMobile,

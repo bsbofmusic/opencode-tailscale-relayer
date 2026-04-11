@@ -1,8 +1,8 @@
 "use strict"
 
 const http = require("http")
-const { now, fresh, uniqueDirectories, classifyError, cacheKey } = require("./util")
-const { setWarm, warmBusy, setLastReason, touchState, targetAdmission } = require("./state")
+const { now, fresh, uniqueDirectories, classifyError, cacheKey, dirKey } = require("./util")
+const { setWarm, warmBusy, setLastReason, backgroundWarmPaused, clientSafeMode, touchState, targetAdmission } = require("./state")
 const { runHeavy, enqueueBackground } = require("./heavy")
 const { saveStateCache } = require("./sync/disk-cache")
 
@@ -102,10 +102,40 @@ async function fetchJsonWith(target, path, options, config) {
   }
 }
 
-function buildMeta(target, health, list, latencyMs, config) {
+function projectRoots(projects) {
+  const seen = new Set()
+  const roots = []
+  for (const item of Array.isArray(projects) ? projects : []) {
+    const dir = item?.worktree
+    const key = dirKey(dir)
+    if (!dir || seen.has(key)) continue
+    seen.add(key)
+    roots.push(dir)
+  }
+  return roots
+}
+
+function latestByRoot(projects, list) {
+  const { latest } = require("./util")
+  const map = {}
+  for (const root of projectRoots(projects)) {
+    const item = latest(list.filter((row) => {
+      if (!row?.directory) return false
+      if (dirKey(row.directory) === dirKey(root)) return true
+      const proj = projects.find((p) => dirKey(p?.worktree) === dirKey(root))
+      return Array.isArray(proj?.sandboxes) && proj.sandboxes.some((item) => dirKey(item) === dirKey(row.directory))
+    }))
+    if (!item?.id || !item?.directory) continue
+    map[root] = { directory: item.directory, id: item.id, at: now() }
+  }
+  return map
+}
+
+function buildMeta(target, health, list, projects, latencyMs, config) {
   const cfg = config || defaults
   const { latest } = require("./util")
   const root = latest(list)
+  const roots = [...new Set([...projectRoots(projects), ...uniqueDirectories(list, cfg.maxProjects)])].slice(0, cfg.maxProjects)
   return {
     target,
     source: { kind: "cli", label: "Global CLI service" },
@@ -119,11 +149,17 @@ function buildMeta(target, health, list, latencyMs, config) {
     sessions: {
       ok: true,
       count: list.length,
-      directories: uniqueDirectories(list, cfg.maxProjects),
+      directories: roots,
       latest: root
         ? { id: root.id || null, title: root.title || null, directory: root.directory || null }
         : null,
       error: list.length ? null : "Target is online but has no historical sessions",
+    },
+    projects: {
+      count: Array.isArray(projects) ? projects.length : 0,
+      roots,
+      inventory: Array.isArray(projects) ? projects : [],
+      lastProjectSession: latestByRoot(projects, list),
     },
     ready: Boolean(health?.healthy === true && root?.id && root?.directory),
     cache: { source: "router", cachedAt: now(), warm: true },
@@ -148,11 +184,26 @@ function metaEnvelope(state) {
       latest: null,
       error: state.failureReason || state.offlineReason || "Target inspection failed",
     },
+    projects: {
+      count: 0,
+      roots: [],
+      inventory: [],
+      lastProjectSession: {},
+    },
     ready: false,
     cache: { source: "router", cachedAt: now(), warm: false },
   }
+  const fallbackRoots = base.sessions?.directories || []
+  const inventory = Array.isArray(state.inventory) ? state.inventory : []
+  const roots = [...new Set([...projectRoots(inventory), ...fallbackRoots])]
   return {
     ...base,
+    projects: base.projects || {
+      count: inventory.length,
+      roots,
+      inventory,
+      lastProjectSession: latestByRoot(inventory, state.sessionList),
+    },
     targetType: state.targetType,
     targetStatus: state.targetStatus,
     admission: state.admission,
@@ -172,8 +223,12 @@ function rememberList(state, directory, limit) {
   state.lists.set(`${directory}\n${limit}`, { body: text, type: "application/json", at: now() })
 }
 
+
 async function cacheMessages(state, target, directory, sessionID, limit, config) {
   const path = `/session/${encodeURIComponent(sessionID)}/message?limit=${limit}&directory=${encodeURIComponent(directory)}`
+  const cfg = config || defaults
+  const maxHeavy = cfg.maxHeavyRequestsPerTarget || 2
+  const maxBg = Math.max(1, maxHeavy - 1)
   const data = await fetchJsonWith(target, path, { heavy: true, state }, config)
   state.messages.set(cacheKey(directory, sessionID, limit), {
     body: data.text,
@@ -194,6 +249,30 @@ async function cacheDetail(state, target, directory, sessionID, config) {
     type: "application/json",
     at: now(),
   })
+  saveStateCache(state, config)
+}
+
+async function cacheProjectCurrent(state, target, directory, config) {
+  const path = `/project/current?directory=${encodeURIComponent(directory)}`
+  const data = await fetchJsonWith(target, path, { state }, config)
+  state.projects.set(directory, {
+    body: data.text,
+    type: "application/json",
+    status: 200,
+    at: now(),
+  })
+  saveStateCache(state, config)
+}
+
+
+async function cacheShellHtml(state, target, config) {
+  const data = await requestText(target, '/', { Accept: 'text/html', 'accept-encoding': 'identity', Connection: 'close' }, config)
+  state.shellHtml = {
+    body: data.text,
+    type: 'text/html; charset=utf-8',
+    status: 200,
+    at: now(),
+  }
   saveStateCache(state, config)
 }
 
@@ -274,18 +353,45 @@ function scheduleSnapshotWarm(state, client, target, latestSession, nearby, conf
     .map((item) => ({ item, limit: item.id === latestSession.id ? 80 : 200 }))
     .filter(({ item, limit }) => !fresh(state.messages.get(cacheKey(item.directory, item.id, limit))?.at, cfg.snapshotCacheMs))
   const jobs = []
+  if (!fresh(state.shellHtml?.at, cfg.snapshotCacheMs)) {
+    jobs.push({
+      key: 'shell-html',
+      run: async () => {
+        setWarm(client, {
+          active: true,
+          ready: true,
+          percent: 54,
+          stage: 'snapshot',
+          note: 'Caching app shell on the VPS...',
+        })
+        await cacheShellHtml(state, target, config)
+      },
+    })
+  }
   if (needsDetail) {
     jobs.push({
       key: `detail\n${latestSession.directory}\n${latestSession.id}`,
       run: async () => {
         setWarm(client, {
-          active: true,
-          ready: true,
-          percent: 60,
-          stage: "snapshot",
+          active: true, ready: true, percent: 60, stage: "snapshot",
           note: "Caching latest session detail in the background...",
         })
         await cacheDetail(state, target, latestSession.directory, latestSession.id, config)
+      },
+    })
+  }
+  if (!fresh(state.projects.get(latestSession.directory)?.at, cfg.snapshotCacheMs)) {
+    jobs.push({
+      key: `project\n${latestSession.directory}`,
+      run: async () => {
+        setWarm(client, {
+          active: true,
+          ready: true,
+          percent: 58,
+          stage: "snapshot",
+          note: "Caching current project context in the background...",
+        })
+        await cacheProjectCurrent(state, target, latestSession.directory, config)
       },
     })
   }
@@ -294,8 +400,7 @@ function scheduleSnapshotWarm(state, client, target, latestSession, nearby, conf
       key: `message\n${item.directory}\n${item.id}\n${limit}`,
       run: async () => {
         setWarm(client, {
-          active: true,
-          ready: true,
+          active: true, ready: true,
           percent: 65 + Math.round(((index + 1) / Math.max(messageJobs.length, 1)) * 30),
           stage: "snapshot",
           note: `Caching session ${index + 1}/${Math.max(messageJobs.length, 1)} in the background...`,
@@ -307,40 +412,23 @@ function scheduleSnapshotWarm(state, client, target, latestSession, nearby, conf
   const pending = jobs.filter((job) => state.backgroundKeys.has(job.key)).length
   if (!jobs.length && !pending) {
     setWarm(client, {
-      active: false,
-      ready: true,
-      percent: 100,
-      stage: "ready",
-      note: "Background cache is already warm.",
-      cachedAt: now(),
-      snapshotCount: nearby.length,
+      active: false, ready: true, percent: 100, stage: "ready",
+      note: "Background cache is already warm.", cachedAt: now(), snapshotCount: nearby.length,
     })
     return
   }
   setWarm(client, {
-    active: true,
-    ready: true,
-    percent: 55,
-    stage: "snapshot",
+    active: true, ready: true, percent: 55, stage: "snapshot",
     note: `Caching ${jobs.length + pending} recent session tasks in the background...`,
-    latestSessionID: latestSession.id,
-    latestDirectory: latestSession.directory,
-    snapshotCount: nearby.length,
+    latestSessionID: latestSession.id, latestDirectory: latestSession.directory, snapshotCount: nearby.length,
   })
   let queued = 0
-  jobs.forEach((job) => {
-    if (enqueueBackground(state, job.key, job.run)) queued += 1
-  })
+  jobs.forEach((job) => { if (enqueueBackground(state, job.key, job.run)) queued += 1 })
   if (!queued && pending) {
     setWarm(client, {
-      active: true,
-      ready: true,
-      percent: 55,
-      stage: "snapshot",
+      active: true, ready: true, percent: 55, stage: "snapshot",
       note: "Background cache is already queued.",
-      latestSessionID: latestSession.id,
-      latestDirectory: latestSession.directory,
-      snapshotCount: nearby.length,
+      latestSessionID: latestSession.id, latestDirectory: latestSession.directory, snapshotCount: nearby.length,
     })
     return
   }
@@ -353,8 +441,7 @@ async function warm(state, client, force, options, config) {
   const requestedSnapshotCount = opts.snapshotCount || cfg.desktopWarmSessionCount
   if (state.promise) {
     setWarm(client, {
-      active: true,
-      ready: Boolean(state.meta?.ready),
+      active: true, ready: Boolean(state.meta?.ready),
       percent: client.warm.percent || 5,
       stage: client.warm.stage === "idle" ? "connect" : client.warm.stage,
       note: state.meta ? "Refreshing cached state..." : "First read may take longer while the VPS builds a cache.",
@@ -367,10 +454,7 @@ async function warm(state, client, force, options, config) {
   const target = state.target
   const body = async () => {
     setWarm(client, {
-      active: true,
-      ready: false,
-      percent: 5,
-      stage: "connect",
+      active: true, ready: false, percent: 5, stage: "connect",
       note: state.meta ? "Refreshing cached state..." : "First read may take longer while the VPS builds a cache.",
       error: null,
     })
@@ -391,7 +475,7 @@ async function warm(state, client, force, options, config) {
     setWarm(client, { percent: 28, stage: "index", note: "Reading remote session index..." })
     let sessions
     try {
-      sessions = await fetchJsonWith(target, `/session?limit=${cfg.maxSessions}`, { heavy: true, state }, config)
+      sessions = await fetchJsonWith(target, `/session?limit=${cfg.directoryDiscoveryLimit || cfg.maxSessions}`, { heavy: true, state }, config)
       state.offline = false
       state.offlineReason = null
       state.targetStatus = "healthy"
@@ -403,8 +487,15 @@ async function warm(state, client, force, options, config) {
       if (failWarm(state, client, err, "Session scan failed")) throw err
       return metaEnvelope(state)
     }
+    let inventory = []
+    try {
+      const projects = await fetchJsonWith(target, '/project', { state }, config)
+      inventory = Array.isArray(projects.data) ? projects.data : []
+      state.inventory = inventory
+      state.inventoryAt = now()
+    } catch {}
     state.sessionList = Array.isArray(sessions.data) ? sessions.data : []
-    state.meta = buildMeta(target, health.data, state.sessionList, health.latencyMs, config)
+    state.meta = buildMeta(target, health.data, state.sessionList, inventory, health.latencyMs, config)
     state.metaAt = now()
     state.targetStatus = state.meta.ready ? "ready" : "no-session"
     state.failureReason = state.meta.ready ? null : state.meta.sessions.error
@@ -418,12 +509,8 @@ async function warm(state, client, force, options, config) {
     saveStateCache(state, config)
     if (!state.meta.ready) {
       setWarm(client, {
-        active: false,
-        ready: false,
-        percent: 100,
-        stage: "done",
-        note: state.meta.sessions.error || "No restoreable session found",
-        cachedAt: state.metaAt,
+        active: false, ready: false, percent: 100, stage: "done",
+        note: state.meta.sessions.error || "No restoreable session found", cachedAt: state.metaAt,
       })
       return metaEnvelope(state)
     }
@@ -432,20 +519,13 @@ async function warm(state, client, force, options, config) {
       .filter((item) => item?.directory === latestSession.directory)
       .slice(0, health.latencyMs >= cfg.slowHealthLatencyMs ? 0 : requestedSnapshotCount)
     setWarm(client, {
-      active: false,
-      ready: true,
-      first: false,
-      percent: 100,
-      stage: "ready",
+      active: false, ready: true, first: false, percent: 100, stage: "ready",
       note: health.latencyMs >= cfg.slowHealthLatencyMs
         ? "Upstream is slow. Opening now and reducing background cache work..."
         : client.warm.first
           ? "Cache index is ready. Opening the latest session..."
           : "Latest session is ready. Opening now...",
-      cachedAt: now(),
-      latestSessionID: latestSession.id,
-      latestDirectory: latestSession.directory,
-      error: null,
+      cachedAt: now(), latestSessionID: latestSession.id, latestDirectory: latestSession.directory, error: null,
     })
     scheduleSnapshotWarm(state, client, target, latestSession, nearby, config)
     state.meta.cache = { source: "router", cachedAt: now(), warm: true }
@@ -492,6 +572,8 @@ module.exports = {
   rememberList,
   cacheMessages,
   cacheDetail,
+  cacheProjectCurrent,
+  cacheShellHtml,
   snapshotGoal,
   settleWarm,
   failWarm,

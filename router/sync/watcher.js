@@ -15,7 +15,7 @@ async function tickWatcher(state, config) {
     const protectedMode = backgroundWarmPaused(state)
     const wasOffline = state.offline
     const health = await fetchJson(state.target, "/global/health", config)
-    const sessions = await fetchJsonWith(state.target, `/session?limit=${config.maxSessions || 80}`, { state, priority: "background", heavy: true }, config)
+    const sessions = await fetchJsonWith(state.target, `/session?limit=${config.directoryDiscoveryLimit || config.maxSessions || 80}`, { state, priority: "background", heavy: true }, config)
 
     state.offline = false
     state.offlineReason = null

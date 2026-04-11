@@ -230,9 +230,17 @@ function landingPage(target) {
 </html>`
 }
 
+function serialize(value) {
+  return JSON.stringify(value)
+    .replace(/</g, "\\u003c")
+    .replace(/>/g, "\\u003e")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029")
+}
+
 function launchPage(target, clientID, initial) {
-  const payload = JSON.stringify({ ...target, client: clientID }).replace(/</g, "\\u003c")
-  const initialPayload = JSON.stringify(initial || null).replace(/</g, "\\u003c")
+  const payload = serialize({ ...target, client: clientID })
+  const initialPayload = serialize(initial || null)
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -256,6 +264,8 @@ function launchPage(target, clientID, initial) {
   </style>
 </head>
 <body>
+  <script id="oc-launch-target" type="application/json">${payload}</script>
+  <script id="oc-launch-initial" type="application/json">${initialPayload}</script>
   <main>
     <h1>Launching Remote OpenCode</h1>
     <p>The VPS is warming a cache so future opens do not start cold.</p>
@@ -271,11 +281,13 @@ function launchPage(target, clientID, initial) {
     </ul>
   </main>
   <script>
-    const target = ${payload}
+    const target = JSON.parse(document.getElementById('oc-launch-target').textContent)
     const fill = document.getElementById('fill')
     const stage = document.getElementById('stage')
     const note = document.getElementById('note')
     const serverKey = 'opencode.global.dat:server'
+    const globalProjectKey = 'opencode.global.dat:globalSync.project'
+    const layoutKey = 'opencode.global.dat:layout.page'
     const defaultServerKey = 'opencode.settings.dat:defaultServerUrl'
     const snapshotKey = 'opencode.router.dat:snapshot'
     const clientKey = 'opencode.router.dat:client'
@@ -285,7 +297,7 @@ function launchPage(target, clientID, initial) {
     let cachedLaunch = null
     let retryAfter = 450
     let usedInitial = false
-    const initial = ${initialPayload}
+    const initial = JSON.parse(document.getElementById('oc-launch-initial').textContent)
     const shownAt = Date.now()
     function read(key) { try { return JSON.parse(localStorage.getItem(key) || '{}') } catch { return {} } }
     function write(key, value) { localStorage.setItem(key, JSON.stringify(value)) }
@@ -329,21 +341,54 @@ function launchPage(target, clientID, initial) {
       return Array.from(new Set(keys))
     }
     function seed(meta) {
+      const keyOf = function (value) { return String(value || '').replace(/\\+/g, '\\\\').toLowerCase() }
       const data = read(serverKey)
       if (!Array.isArray(data.list)) data.list = []
       if (!data.projects || typeof data.projects !== 'object') data.projects = {}
       if (!data.lastProject || typeof data.lastProject !== 'object') data.lastProject = {}
       const seen = new Set()
       const merged = []
-      ;(meta.sessions.directories || []).forEach(function (dir, index) {
-        if (!dir || seen.has(dir)) return
-        seen.add(dir)
+      serverKeys().forEach(function (key) {
+        const list = Array.isArray(data.projects[key]) ? data.projects[key] : []
+        list.forEach(function (item) {
+          const dir = item && item.worktree
+          const key = keyOf(dir)
+          if (!dir || seen.has(key)) return
+          seen.add(key)
+          merged.push(item)
+        })
+      })
+      ;((meta.projects && meta.projects.roots) || meta.sessions.directories || []).forEach(function (dir, index) {
+        const key = keyOf(dir)
+        if (!dir || seen.has(key)) return
+        seen.add(key)
         merged.push({ worktree: dir, expanded: index === 0 })
       })
       serverKeys().forEach(function (key) {
         data.projects[key] = merged
         if (meta.sessions.latest && meta.sessions.latest.directory) data.lastProject[key] = meta.sessions.latest.directory
       })
+      if (meta.projects && Array.isArray(meta.projects.inventory) && meta.projects.inventory.length) {
+        write(globalProjectKey, { value: meta.projects.inventory })
+      }
+      const layout = read(layoutKey)
+      if (!layout.lastProjectSession || typeof layout.lastProjectSession !== 'object') layout.lastProjectSession = {}
+      if (meta.projects && meta.projects.lastProjectSession && typeof meta.projects.lastProjectSession === 'object') {
+        Object.assign(layout.lastProjectSession, meta.projects.lastProjectSession)
+      }
+      if (meta.sessions.latest && meta.sessions.latest.directory && meta.sessions.latest.id) {
+        write(layoutKey, {
+          ...layout,
+          lastProjectSession: {
+            ...layout.lastProjectSession,
+            [meta.sessions.latest.directory]: {
+              directory: meta.sessions.latest.directory,
+              id: meta.sessions.latest.id,
+              at: Date.now(),
+            },
+          },
+        })
+      }
       localStorage.setItem(defaultServerKey, origin)
       write(serverKey, data)
       sessionStorage.setItem(snapshotKey, JSON.stringify({ cachedAt: Date.now(), source: 'vps', target: target }))
@@ -454,23 +499,15 @@ function sessionSyncRuntime() {
     if (window.__ocTailnetSync) return
     window.__ocTailnetSync = true
     const key = 'oc-tailnet-sync:last-reload'
-    const params = new URLSearchParams(location.search)
     const query = (path) => {
       const next = new URLSearchParams(location.search)
       const text = next.toString()
       return text ? path + '?' + text : path
     }
-    const chip = document.createElement('div')
-    chip.id = 'oc-tailnet-sync-chip'
-    chip.style.cssText = 'position:fixed;left:50%;top:14px;transform:translateX(-50%);z-index:2147483647;padding:8px 10px;border-radius:999px;background:#08111d;color:#eef4ff;border:1px solid #20314b;box-shadow:0 8px 24px rgba(0,0,0,.35);font:12px/1.2 Inter,Segoe UI,sans-serif;pointer-events:none'
-    const paint = (state, reason) => { chip.textContent = reason ? 'Tailnet ' + state + ': ' + reason : 'Tailnet ' + state }
-    const mount = () => { if (!document.body.contains(chip)) document.body.appendChild(chip) }
-    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', mount, { once: true })
-    else mount()
+    const paint = () => {}
     const act = async () => {
       const res = await fetch(query('/__oc/progress'), { credentials: 'same-origin', cache: 'no-store' })
       const data = await res.json()
-      paint(data.syncState || 'live', data.staleReason || '')
       if (data.lastAction === 'soft-refresh' && data.syncState === 'stale') {
         const last = Number(sessionStorage.getItem(key) || '0')
         if (Date.now() - last > 1500) {

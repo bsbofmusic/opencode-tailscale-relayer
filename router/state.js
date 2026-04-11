@@ -42,10 +42,15 @@ function createState(target) {
     lastSyncAt: 0,
     meta: undefined,
     metaAt: 0,
+    inventory: [],
+    inventoryAt: 0,
     sessionList: [],
     lists: new Map(),
     messages: new Map(),
     details: new Map(),
+    projects: new Map(),
+    assets: new Map(),
+    shellHtml: null,
     heavyActive: 0,
     heavyBackgroundActive: 0,
     heavyQueue: [],
@@ -247,7 +252,7 @@ function scheduleBackgroundResume(state) {
   const delay = Math.max(0, ...[...state.clients.values()].map((c) => Math.max(0, (c.resumeSafeUntil || 0) - now())))
   if (!delay) {
     state.resumeTimer = undefined
-    if (!backgroundWarmPaused(state) && typeof state.onResume === "function") {
+    if (!backgroundWarmPaused(state) && typeof state.onResume === 'function') {
       state.onResume(state)
     }
     return
@@ -255,7 +260,7 @@ function scheduleBackgroundResume(state) {
   state.resumeTimer = setTimeout(() => {
     state.resumeTimer = undefined
     if (backgroundWarmPaused(state)) return
-    if (typeof state.onResume === "function") {
+    if (typeof state.onResume === 'function') {
       state.onResume(state)
     }
   }, delay)

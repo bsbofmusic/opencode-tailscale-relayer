@@ -184,3 +184,4 @@ Release notes:
 - `docs/RELEASE-v0.0.12.md`: public sync to the modular final-experience baseline with launcher host/port injection and autogo defaults
 - `docs/RELEASE-v0.1.1.md`: relay-only active-session sync with inline session runtime and router-owned sync actions
 - `docs/RELEASE-v0.1.2.md`: official-OpenCode-only relayer with target typing, admission states, and browser-gated delivery
+- `docs/RELEASE-v0.1.4.md`: multi-workspace session visibility and non-obstructive Tailnet status behavior

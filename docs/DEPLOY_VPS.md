@@ -185,6 +185,15 @@ For `v0.1.2`, also confirm the relayer surfaces target typing clearly:
 2. `progress.admission` is present.
 3. `healthz.states[*].targetType` and `healthz.states[*].admission` match the expected target policy.
 
+## 0.1.4 Workspace And Chip Verify
+
+After deploy, also verify these user-facing outcomes:
+
+1. From the landing page, opening the target still reaches the session page normally.
+2. Multiple workspace roots can be surfaced in the project rail (for example `D:\CODE` and `E:\CODE`).
+3. Switching to another workspace changes the visible session list accordingly.
+4. The Tailnet status chip is not shown during normal `live` state, so it does not obstruct the search or header area.
+
 This section is secondary. The release gate comes first: if `verify-launch-gate.js` fails, the build is not shippable even if headers and sync state endpoints look healthy.
 
 ## Typical Flow
