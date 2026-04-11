@@ -31,6 +31,7 @@ function proxyRequest(ctx, req, res) {
   const { target, state, client, reqUrl, config, wantCookie, priority } = ctx
   const heavy = req.method === "GET" && isHeavyRequest(reqUrl)
   const guardHtml = req.method === "GET" && isSessionHtmlPath(reqUrl.pathname)
+  const assetRequest = req.method === "GET" && /^\/(assets\/|favicon|site\.webmanifest)/.test(reqUrl.pathname)
   const htmlProxyTimeoutMs = config.htmlProxyTimeoutMs || 8000
   const recoveryHtmlTimeoutMs = config.recoveryHtmlTimeoutMs || 15000
   const htmlTimeoutMs = clientSafeMode(client) ? recoveryHtmlTimeoutMs : htmlProxyTimeoutMs
@@ -46,10 +47,10 @@ function proxyRequest(ctx, req, res) {
       headers: {
         ...req.headers,
         host: `${target.host}:${target.port}`,
-        connection: req.headers.upgrade ? "upgrade" : (guardHtml ? "close" : "keep-alive"),
+        connection: req.headers.upgrade ? "upgrade" : ((guardHtml || assetRequest) ? "close" : "keep-alive"),
         "accept-encoding": "identity",
       },
-      agent: guardHtml ? false : getAgent(),
+      agent: (guardHtml || assetRequest) ? false : getAgent(),
     }
     const auth = upstreamAuth()
     let finished = false
@@ -62,7 +63,7 @@ function proxyRequest(ctx, req, res) {
       const dir = requestDirectory(client, reqUrl)
       const msg = reqUrl.pathname.match(/^\/session\/([^/]+)\/message$/)
       const limit = Number(reqUrl.searchParams.get("limit") || "0")
-      const reason = msg && dir && !reqUrl.searchParams.has("cursor") ? messageBypassReason(state, client, dir, decodeURIComponent(msg[1]), limit) : null
+      const reason = msg && dir && !reqUrl.searchParams.has("cursor") && !reqUrl.searchParams.has("before") ? messageBypassReason(state, client, dir, decodeURIComponent(msg[1]), limit) : null
       Object.assign(headers, relayHeaders(priority, "proxy", reason || "proxy-pass", reason ? "bypass" : undefined))
       delete headers["content-security-policy"]
       delete headers["content-security-policy-report-only"]
@@ -70,7 +71,7 @@ function proxyRequest(ctx, req, res) {
       if (location) headers.location = location
       else delete headers.location
       if (wantCookie) headers["set-cookie"] = [`${targetCookie}=${target.host}:${target.port}; Path=/; Max-Age=2592000; SameSite=Lax`]
-      const canStore = guardHtml || (req.method === "GET" && dir && !reqUrl.searchParams.has("cursor") && ((msg && (limit === 80 || limit === 200)) || reqUrl.pathname === "/session" || /^\/session\/[^/]+$/.test(reqUrl.pathname)))
+      const canStore = guardHtml || (req.method === "GET" && dir && !reqUrl.searchParams.has("cursor") && !reqUrl.searchParams.has("before") && ((msg && (limit === 80 || limit === 200)) || reqUrl.pathname === "/session" || /^\/session\/[^/]+$/.test(reqUrl.pathname)))
 
       if (!canStore) {
         finished = true

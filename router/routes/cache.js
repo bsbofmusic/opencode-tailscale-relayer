@@ -22,21 +22,13 @@ function maybeServeCached(ctx, req, res) {
   const priority = relayPriority(reqUrl, client)
 
   if (reqUrl.pathname === "/session" && reqUrl.searchParams.get("roots") === "true" && directory) {
-    const limit = Number(reqUrl.searchParams.get("limit") || "55")
-    const hit = state.lists.get(`${directory}\n${limit}`) || state.lists.get(`${directory}\n55`)
-    if (!hit) {
-      state.stats.cacheMiss += 1
-      return false
-    }
-    state.stats.cacheHit += 1
+    state.stats.cacheBypass += 1
     clearLastReason(state, client)
-    if (!fresh(hit.at, snapshotCacheMs)) refresh(state, client, config)
-    raw(res, hit.status || 200, hit.body, hit.type, cacheHeaders(priority))
-    return true
+    return false
   }
 
   const match = reqUrl.pathname.match(/^\/session\/([^/]+)\/message$/)
-  if (match && directory && !reqUrl.searchParams.has("cursor")) {
+  if (match && directory && !reqUrl.searchParams.has("cursor") && !reqUrl.searchParams.has("before")) {
     const sessionID = decodeURIComponent(match[1])
     const limit = Number(reqUrl.searchParams.get("limit") || "0")
     if (messageBypass(state, client, directory, sessionID, limit)) {
