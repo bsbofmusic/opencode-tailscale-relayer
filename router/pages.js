@@ -304,37 +304,13 @@ function launchPage(target, clientID, initial) {
         clearTimeout(timer)
       }
     }
-    function nextUrl(launch) {
-      return '/' + launch.directory + '/session/' + encodeURIComponent(launch.sessionID)
-        + '?host=' + encodeURIComponent(target.host)
-        + '&port=' + encodeURIComponent(target.port)
-        + '&client=' + encodeURIComponent(target.client)
-    }
-    function handoffUrl() {
+    function launchUrl() {
       return '/__oc/launch?host=' + encodeURIComponent(target.host)
         + '&port=' + encodeURIComponent(target.port)
         + '&client=' + encodeURIComponent(target.client)
-        + '&handoff=1'
     }
-    function submitHandoff() {
-      const form = document.createElement('form')
-      form.method = 'GET'
-      form.action = '/__oc/launch'
-      form.style.display = 'none'
-      ;[
-        ['host', target.host],
-        ['port', target.port],
-        ['client', target.client],
-        ['handoff', '1'],
-      ].forEach(function (pair) {
-        const input = document.createElement('input')
-        input.type = 'hidden'
-        input.name = pair[0]
-        input.value = String(pair[1])
-        form.appendChild(input)
-      })
-      document.body.appendChild(form)
-      form.submit()
+    function requestServerEntry() {
+      location.replace(launchUrl())
     }
     function reveal(launch) {
       if (!launch) return
@@ -343,11 +319,11 @@ function launchPage(target, clientID, initial) {
     }
     function go(launch) {
       reveal(launch)
-      submitHandoff()
+      requestServerEntry()
     }
     fallback.addEventListener('click', function () {
       if (!cachedLaunch) return
-      submitHandoff()
+      requestServerEntry()
     })
     function serverKeys() {
       const keys = [origin]
@@ -402,7 +378,7 @@ function launchPage(target, clientID, initial) {
       const minVisible = 180
       const delay = Math.max(0, minVisible - (Date.now() - shownAt))
       if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay))
-      submitHandoff()
+      requestServerEntry()
     }
     async function tick() {
       let res, data
@@ -423,26 +399,16 @@ function launchPage(target, clientID, initial) {
       stage.textContent = label(data.warm && data.warm.stage)
       note.textContent = explain(data)
       if (!res.ok) throw new Error(data.error || ('Request failed: ' + res.status))
-        if (data.launchReady && data.launch) {
-          reveal(data.launch)
-          if (data.meta) seed(data.meta)
-          stage.textContent = 'Ready. Opening the session...'
-          note.textContent = data.resumeSafeMode ? 'Recovery-safe mode is on. The VPS will enter gently.' : 'The VPS has prepared the session. Entering now...'
-          const minVisible = 180
+      if (data.launchReady && data.launch) {
+        reveal(data.launch)
+        if (data.meta) seed(data.meta)
+        stage.textContent = 'Ready. Opening the session...'
+        note.textContent = data.resumeSafeMode ? 'Recovery-safe mode is on. The VPS will enter gently.' : 'The relayer has prepared the session. Handing off now...'
+        const minVisible = 180
         const delay = Math.max(0, minVisible - (Date.now() - shownAt))
         if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay))
-          go(data.launch)
-          return true
-        }
-      if (polls % 12 === 0) {
-        const metaResult = await fetchJson('/__oc/meta?host=' + encodeURIComponent(target.host) + '&port=' + encodeURIComponent(target.port) + '&client=' + encodeURIComponent(target.client), 4000)
-        const metaRes = metaResult.res
-        const meta = metaResult.data
-        if (metaRes.ok && meta && meta.ready && meta.sessions && meta.sessions.latest) {
-          seed(meta)
-          go({ directory: encodeDir(meta.sessions.latest.directory), sessionID: meta.sessions.latest.id })
-          return true
-        }
+        requestServerEntry()
+        return true
       }
       return false
     }
@@ -462,7 +428,7 @@ function launchPage(target, clientID, initial) {
             fallback.hidden = false
             note.textContent += ' You can open the cached session now.'
             await new Promise((resolve) => setTimeout(resolve, 1500))
-            location.replace(nextUrl(cachedLaunch))
+            requestServerEntry()
             return
           }
         }
@@ -488,7 +454,7 @@ function sessionSyncRuntime() {
     }
     const chip = document.createElement('div')
     chip.id = 'oc-tailnet-sync-chip'
-    chip.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:2147483647;padding:8px 10px;border-radius:999px;background:#08111d;color:#eef4ff;border:1px solid #20314b;box-shadow:0 8px 24px rgba(0,0,0,.35);font:12px/1.2 Inter,Segoe UI,sans-serif'
+    chip.style.cssText = 'position:fixed;left:50%;top:14px;transform:translateX(-50%);z-index:2147483647;padding:8px 10px;border-radius:999px;background:#08111d;color:#eef4ff;border:1px solid #20314b;box-shadow:0 8px 24px rgba(0,0,0,.35);font:12px/1.2 Inter,Segoe UI,sans-serif;pointer-events:none'
     const paint = (state, reason) => { chip.textContent = reason ? 'Tailnet ' + state + ': ' + reason : 'Tailnet ' + state }
     const mount = () => { if (!document.body.contains(chip)) document.body.appendChild(chip) }
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', mount, { once: true })

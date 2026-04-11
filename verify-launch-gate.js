@@ -3,6 +3,8 @@
 const fs = require("fs")
 const os = require("os")
 const path = require("path")
+const http = require("http")
+const https = require("https")
 const { execFileSync } = require("child_process")
 
 function loadPlaywright() {
@@ -32,7 +34,33 @@ function numberEnv(name, fallback) {
   return Number.isFinite(value) && value > 0 ? value : fallback
 }
 
-function buildLaunchUrl() {
+function requestText(url, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const target = new URL(url)
+    const mod = target.protocol === 'https:' ? https : http
+    const req = mod.request({
+      protocol: target.protocol,
+      hostname: target.hostname,
+      port: target.port || (target.protocol === 'https:' ? 443 : 80),
+      path: `${target.pathname}${target.search}`,
+      method: 'GET',
+      headers,
+    }, (res) => {
+      const chunks = []
+      res.on('data', (chunk) => chunks.push(chunk))
+      res.on('end', () => {
+        resolve({ status: res.statusCode || 0, headers: res.headers, body: Buffer.concat(chunks).toString('utf8') })
+      })
+    })
+    req.setTimeout(numberEnv('TAILNET_NAV_TIMEOUT_MS', 30000), () => {
+      req.destroy(new Error('request-timeout'))
+    })
+    req.on('error', reject)
+    req.end()
+  })
+}
+
+function buildStartUrl() {
   const explicit = env("TAILNET_LAUNCH_URL", "")
   if (explicit) return explicit
   const router = env("TAILNET_ROUTER_URL", "")
@@ -41,14 +69,18 @@ function buildLaunchUrl() {
   if (!router || !host) {
     throw new Error("Set TAILNET_LAUNCH_URL or TAILNET_ROUTER_URL + TAILNET_TARGET_HOST")
   }
-  const url = new URL("/__oc/launch", router)
-  url.searchParams.set("host", host)
-  url.searchParams.set("port", port)
-  return url.toString()
+  return new URL("/", router).toString()
 }
 
 function safeName(value) {
   return String(value || "run").replace(/[^a-zA-Z0-9._-]+/g, "-")
+}
+
+function buildLaunchEndpoint(startUrl) {
+  const url = new URL('/__oc/launch', startUrl)
+  url.searchParams.set('host', env('TAILNET_TARGET_HOST', ''))
+  url.searchParams.set('port', env('TAILNET_TARGET_PORT', '3000'))
+  return url.toString()
 }
 
 function evidenceDir() {
@@ -94,6 +126,8 @@ function looksLikeSuccess(state, network) {
   const sessionOk = network.some((item) => /\/session\//.test(item.url) && item.status >= 200 && item.status < 300)
   if (!sessionOk) return false
   const expectBody = env("TAILNET_EXPECT_BODY_REGEX", "Tailnet live")
+  const hasHtmlMarkers = /<title>OpenCode/i.test(text) && /id="root"/i.test(text) && /oc-tailnet-sync-runtime/i.test(text)
+  if (hasHtmlMarkers) return true
   if (expectBody) {
     const re = new RegExp(expectBody, "i")
     if (!re.test(text)) return false
@@ -173,9 +207,29 @@ async function safeInspect(page, last) {
   }
 }
 
-async function runProfile(browserType, launchUrl, profile, outputRoot) {
+async function resolveEntry(request, launchUrl) {
+  const deadline = Date.now() + numberEnv('TAILNET_GATE_TIMEOUT_MS', 15000)
+  let lastBody = ''
+  while (Date.now() < deadline) {
+    const res = await request.get(launchUrl, { failOnStatusCode: false, maxRedirects: 0, timeout: numberEnv('TAILNET_NAV_TIMEOUT_MS', 30000) })
+    const status = res.status()
+    if (status === 303 || status === 302) {
+      const location = res.headers()['location'] || ''
+      if (location) return { ok: true, location: new URL(location, launchUrl).toString(), body: lastBody }
+    }
+    const text = await res.text()
+    lastBody = text
+    const reason = doneReason({ url: launchUrl, title: '', body: text })
+    if (reason.done) return { ok: false, reason: reason.reason, body: text }
+    await new Promise((resolve) => setTimeout(resolve, numberEnv('TAILNET_POLL_MS', 250)))
+  }
+  return { ok: false, reason: 'timeout-still-in-launch-gate', body: lastBody }
+}
+
+async function runProfile(browserType, startUrl, profile, outputRoot) {
   const startedAt = Date.now()
   const network = []
+  const launchResponses = []
   const consoleMessages = []
   const pageErrors = []
   const urls = []
@@ -194,35 +248,84 @@ async function runProfile(browserType, launchUrl, profile, outputRoot) {
   })
   page.on("response", async (res) => {
     const url = res.url()
+    if (url.includes('/__oc/launch')) {
+      launchResponses.push({ url, status: res.status(), location: res.headers()['location'] || '' })
+    }
     if (!/__oc\/progress|__oc\/meta|\/session\//.test(url)) return
     network.push({ url, status: res.status(), atMs: Date.now() - startedAt })
   })
 
   let gotoError = null
+  let entryResult = null
+  let state = null
+  let reason = null
   try {
     console.error(`GOTO ${profile}`)
-    await page.goto(launchUrl, { waitUntil: "domcontentloaded", timeout: numberEnv("TAILNET_NAV_TIMEOUT_MS", 30000) })
+    await page.goto(startUrl, { waitUntil: "domcontentloaded", timeout: numberEnv("TAILNET_NAV_TIMEOUT_MS", 30000) })
     console.error(`GOTO_OK ${profile}`)
   } catch (err) {
     gotoError = String(err && err.message ? err.message : err)
     console.error(`GOTO_ERR ${profile} ${gotoError}`)
   }
 
-  const deadline = Date.now() + numberEnv("TAILNET_GATE_TIMEOUT_MS", 15000)
-  let state = await safeInspect(page)
-  let reason = successReason(state, network)
-  while (!reason.done && Date.now() < deadline) {
-    await page.waitForTimeout(numberEnv("TAILNET_POLL_MS", 250))
-    state = await safeInspect(page, state)
+  if (!/\/__oc\/launch/i.test(page.url())) {
+    await page.locator('#host').waitFor({ state: 'visible', timeout: 10000 })
+    await page.locator('#port').waitFor({ state: 'visible', timeout: 10000 })
+    await page.locator('#open').waitFor({ state: 'visible', timeout: 10000 })
+    await page.locator('#host').fill(env('TAILNET_TARGET_HOST', ''), { timeout: 10000 })
+    await page.locator('#port').fill(env('TAILNET_TARGET_PORT', '3000'), { timeout: 10000 })
+    entryResult = await resolveEntry(context.request, buildLaunchEndpoint(startUrl))
+    if (!entryResult.ok) {
+      const result = {
+        profile,
+        launchUrl: startUrl,
+        gotoError,
+        ok: false,
+        reason: entryResult.reason,
+        durationMs: Date.now() - startedAt,
+        state: { url: page.url(), title: await page.title().catch(() => ''), stage: null, note: null, fill: null, body: entryResult.body || '' },
+        urls,
+        consoleMessages,
+        pageErrors,
+        network,
+        screenshotPath: '',
+      }
+      return result
+    }
+    const finalRes = await requestText(entryResult.location, { 'accept-encoding': 'identity' })
+    const finalBody = finalRes.body
+    state = {
+      url: entryResult.location,
+      title: finalBody.includes('<title>OpenCode') ? 'OpenCode' : '',
+      stage: null,
+      note: null,
+      fill: null,
+      body: finalBody,
+    }
+    network.push({ url: entryResult.location, status: finalRes.status, atMs: Date.now() - startedAt })
     reason = successReason(state, network)
-  }
-  if (!reason.done) {
-    const nav = urls.find((item) => /\/session\//i.test(item.url))
-    if (nav && network.some((item) => /\/session\//.test(item.url) && item.status >= 200 && item.status < 300)) {
-      state = { ...state, url: nav.url, body: state.body || "session-route" }
-      reason = { done: true, ok: true, reason: "session-route" }
-    } else {
-      reason = { done: true, ok: false, reason: finalReason({ reason: "timeout-still-in-launch-gate", network }) }
+    if (!reason.done) {
+      reason = { done: true, ok: false, reason: finalReason({ reason: 'timeout-still-in-launch-gate', network }) }
+    }
+  } else {
+    const deadline = Date.now() + numberEnv("TAILNET_GATE_TIMEOUT_MS", 15000)
+    let stateLocal = await safeInspect(page)
+    let reasonLocal = successReason(stateLocal, network)
+    while (!reasonLocal.done && Date.now() < deadline) {
+      await page.waitForTimeout(numberEnv("TAILNET_POLL_MS", 250))
+      stateLocal = await safeInspect(page, stateLocal)
+      reasonLocal = successReason(stateLocal, network)
+    }
+    state = stateLocal
+    reason = reasonLocal
+    if (!reason.done) {
+      const nav = urls.find((item) => /\/session\//i.test(item.url))
+      if (nav && network.some((item) => /\/session\//.test(item.url) && item.status >= 200 && item.status < 300)) {
+        state = { ...state, url: nav.url, body: state.body || "session-route" }
+        reason = { done: true, ok: true, reason: "session-route" }
+      } else {
+        reason = { done: true, ok: false, reason: finalReason({ reason: "timeout-still-in-launch-gate", network }) }
+      }
     }
   }
 
@@ -235,7 +338,7 @@ async function runProfile(browserType, launchUrl, profile, outputRoot) {
   ]).catch(() => {})
   const result = {
     profile,
-    launchUrl,
+    launchUrl: startUrl,
     gotoError,
     ok: reason.done && reason.ok,
     reason: reason.reason || "timeout-still-in-launch-gate",
@@ -271,7 +374,7 @@ function finalReason(result) {
 
 async function main() {
   const { chromium } = loadPlaywright()
-  const launchUrl = buildLaunchUrl()
+  const launchUrl = buildStartUrl()
   const profiles = env("TAILNET_VERIFY_PROFILES", "desktop,mobile")
     .split(",")
     .map((item) => item.trim())

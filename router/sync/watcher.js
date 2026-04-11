@@ -1,7 +1,7 @@
 "use strict"
 
 const { backgroundWarmPaused, setLastReason, setClientHeads, setSyncState } = require("../state")
-const { uniqueDirectories } = require("../util")
+const { cacheKey, uniqueDirectories } = require("../util")
 const { emitTargetEvent } = require("./bus")
 const { saveStateCache } = require("./disk-cache")
 

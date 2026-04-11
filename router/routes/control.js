@@ -229,7 +229,7 @@ function handleControl(ctx, req, res, states) {
   if (ctx.controlRoute === "/launch") {
     const run = async () => {
       const payload = await resolveLaunch(state, client, snapshotCount, config)
-      if (reqUrl.searchParams.get("handoff") === "1" && payload.launchReady && payload.launch) {
+      if (payload.launchReady && payload.launch) {
         if (wantCookie) setTargetCookie(res, target)
         clearLastReason(state, client)
         res.writeHead(303, withRelay({ Location: handoffLocation(target, payload.launch), "Cache-Control": "no-store" }, "foreground", "control", "launch-handoff"))

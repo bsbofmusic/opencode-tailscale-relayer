@@ -170,8 +170,12 @@ function proxyRequest(ctx, req, res) {
       setLastReason(state, client, "upstream-request-failed")
       json(res, 502, { error: err.message }, relayHeaders(priority, "error", "upstream-request-failed"))
     })
-    req.on("data", (chunk) => upstream.write(chunk))
-    req.on("end", () => upstream.end())
+    if (req.method === "GET" || req.method === "HEAD") {
+      upstream.end()
+    } else {
+      req.on("data", (chunk) => upstream.write(chunk))
+      req.on("end", () => upstream.end())
+    }
   }
   if (heavy) {
     runHeavy(state, runRequest, priority, maxHeavy, maxBg).catch((err) => {
