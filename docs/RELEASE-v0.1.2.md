@@ -50,6 +50,8 @@ Validated with:
 
 Live browser gate evidence:
 
+- attach-only desktop: `ok=true`, `reason=session-route`, `durationMs=8177`
+- attach-only mobile: `ok=true`, `reason=session-route`, `durationMs=14084`
 - launcher-managed landing-flow desktop: `ok=true`, `reason=session-route`, `durationMs=10459`
 - launcher-managed landing-flow mobile: `ok=true`, `reason=session-route`, `durationMs=6043`
 
