@@ -128,7 +128,10 @@ function isSessionHtmlPath(pathname) {
 
 function isHeavyRequest(reqUrl) {
   if (reqUrl.pathname === "/session/status") return false
-  if (reqUrl.pathname === "/session") return true
+  if (reqUrl.pathname === "/session") {
+    if (reqUrl.searchParams.get("roots") === "true") return false
+    return true
+  }
   return /^\/session\/[^/]+\/message$/.test(reqUrl.pathname)
 }
 
@@ -139,6 +142,10 @@ function messageRequestInfo(reqUrl) {
     sessionID: decodeURIComponent(match[1]),
     limit: Number(reqUrl.searchParams.get("limit") || "0"),
   }
+}
+
+function bootstrapKey(pathname, directory) {
+  return `${pathname}\n${directory || ""}`
 }
 
 module.exports = {
@@ -165,4 +172,5 @@ module.exports = {
   isSessionHtmlPath,
   isHeavyRequest,
   messageRequestInfo,
+  bootstrapKey,
 }

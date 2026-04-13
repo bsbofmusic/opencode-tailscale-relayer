@@ -2,9 +2,9 @@
 
 const { json, withRelay, relayHeaders } = require("../http")
 const { launchPage } = require("../pages")
-const { clientSafeMode, clearLastReason, setLastReason, warmBusy, backgroundWarmPaused, syncAction, syncClientView, targetAdmission } = require("../state")
+const { clientSafeMode, clearLastReason, setLastReason, warmBusy, backgroundWarmPaused, syncAction, syncClientView, targetAdmission, setClientView } = require("../state")
 const { syncWarm, warm, refresh, metaEnvelope } = require("../warm")
-const { classifyError, encodeDir } = require("../util")
+const { classifyError, isMobile, validClient, encodeDir } = require("../util")
 const { targetCookie } = require("../context")
 const { subscribeTarget } = require("../sync/bus")
 
@@ -22,12 +22,12 @@ function handoffLocation(target, launch) {
 
 function progressPayload(state, client) {
   syncWarm(state, client)
-  syncClientView(state, client)
   state.admission = targetAdmission(state)
   const launchReady = Boolean(state.meta?.ready && state.meta?.sessions?.latest?.id && state.meta?.sessions?.latest?.directory)
-  const launchTarget = client.view?.sessionID && client.view?.directory
-    ? { id: client.view.sessionID, directory: client.view.directory }
-    : state.meta?.sessions?.latest
+  const launchTarget = (client.activeSessionID && client.activeDirectory)
+    ? { id: client.activeSessionID, directory: client.activeDirectory }
+    : (state.meta?.sessions?.latest ? { id: state.meta.sessions.latest.id, directory: state.meta.sessions.latest.directory } : null)
+  syncClientView(state, client)
   const refreshing = Boolean(client.warm.active && warmBusy(state))
   const action = syncAction(state, client)
   const syncState = action === "defer" && client.syncState === "stale"
@@ -194,6 +194,13 @@ function handleControl(ctx, req, res, states) {
 
   if (ctx.controlRoute === "/progress") {
     try {
+      const sessionID = reqUrl.searchParams.get("sessionID")
+      const directory = reqUrl.searchParams.get("directory")
+      if (sessionID && directory) {
+        client.activeSessionID = sessionID
+        client.activeDirectory = directory
+        setClientView(client, { sessionID, directory, pathname: null })
+      }
       clearLastReason(state, client)
       const cookieHeader = wantCookie ? { "Set-Cookie": `${targetCookie}=${target.host}:${target.port}; Path=/; Max-Age=2592000; SameSite=Lax` } : undefined
       json(res, 200, progressPayload(state, client), withRelay(cookieHeader, "foreground", "control", clientSafeMode(client) ? "resume-safe-progress" : "progress"))
@@ -233,8 +240,7 @@ function handleControl(ctx, req, res, states) {
       clearLastReason(state, client)
       res.writeHead(200, withRelay(
         { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
-        "foreground",
-        "control",
+        "foreground", "control",
         payload.resumeSafeMode ? "resume-safe-launch-page" : payload.launchReady ? "launch-gate-ready" : "launch-gate",
       ))
       res.end(launchPage(target, client.id, payload))

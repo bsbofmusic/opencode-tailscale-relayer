@@ -38,14 +38,8 @@ function proxyUpgrade(req, socket, head, target, reqUrl, state, config) {
     agent: getAgent(),
   })
   if (terminal) {
-    socket.on("close", () => {
-      cleanup()
-      if (!upstream.destroyed) upstream.destroy()
-    })
-    socket.on("error", () => {
-      cleanup()
-      if (!upstream.destroyed) upstream.destroy()
-    })
+    socket.on("close", () => { cleanup(); if (!upstream.destroyed) upstream.destroy() })
+    socket.on("error", () => { cleanup(); if (!upstream.destroyed) upstream.destroy() })
   }
   upstream.on("upgrade", (upRes, upSocket, upHead) => {
     writeUpgradeResponse(socket, upRes)
@@ -58,14 +52,8 @@ function proxyUpgrade(req, socket, head, target, reqUrl, state, config) {
     upSocket.pipe(socket)
     socket.pipe(upSocket)
   })
-  upstream.on("response", () => {
-    cleanup()
-    socket.destroy()
-  })
-  upstream.on("error", () => {
-    cleanup()
-    socket.destroy()
-  })
+  upstream.on("response", () => { cleanup(); socket.destroy() })
+  upstream.on("error", () => { cleanup(); socket.destroy() })
   upstream.end()
 }
 

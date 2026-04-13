@@ -341,57 +341,8 @@ function launchPage(target, clientID, initial) {
       return Array.from(new Set(keys))
     }
     function seed(meta) {
-      const keyOf = function (value) { return String(value || '').replace(/\\+/g, '\\\\').toLowerCase() }
-      const data = read(serverKey)
-      if (!Array.isArray(data.list)) data.list = []
-      if (!data.projects || typeof data.projects !== 'object') data.projects = {}
-      if (!data.lastProject || typeof data.lastProject !== 'object') data.lastProject = {}
-      const seen = new Set()
-      const merged = []
-      serverKeys().forEach(function (key) {
-        const list = Array.isArray(data.projects[key]) ? data.projects[key] : []
-        list.forEach(function (item) {
-          const dir = item && item.worktree
-          const key = keyOf(dir)
-          if (!dir || seen.has(key)) return
-          seen.add(key)
-          merged.push(item)
-        })
-      })
-      ;((meta.projects && meta.projects.roots) || meta.sessions.directories || []).forEach(function (dir, index) {
-        const key = keyOf(dir)
-        if (!dir || seen.has(key)) return
-        seen.add(key)
-        merged.push({ worktree: dir, expanded: index === 0 })
-      })
-      serverKeys().forEach(function (key) {
-        data.projects[key] = merged
-        if (meta.sessions.latest && meta.sessions.latest.directory) data.lastProject[key] = meta.sessions.latest.directory
-      })
-      if (meta.projects && Array.isArray(meta.projects.inventory) && meta.projects.inventory.length) {
-        write(globalProjectKey, { value: meta.projects.inventory })
-      }
-      const layout = read(layoutKey)
-      if (!layout.lastProjectSession || typeof layout.lastProjectSession !== 'object') layout.lastProjectSession = {}
-      if (meta.projects && meta.projects.lastProjectSession && typeof meta.projects.lastProjectSession === 'object') {
-        Object.assign(layout.lastProjectSession, meta.projects.lastProjectSession)
-      }
-      if (meta.sessions.latest && meta.sessions.latest.directory && meta.sessions.latest.id) {
-        write(layoutKey, {
-          ...layout,
-          lastProjectSession: {
-            ...layout.lastProjectSession,
-            [meta.sessions.latest.directory]: {
-              directory: meta.sessions.latest.directory,
-              id: meta.sessions.latest.id,
-              at: Date.now(),
-            },
-          },
-        })
-      }
-      localStorage.setItem(defaultServerKey, origin)
-      write(serverKey, data)
-      sessionStorage.setItem(snapshotKey, JSON.stringify({ cachedAt: Date.now(), source: 'vps', target: target }))
+      sessionStorage.setItem(clientKey, target.client)
+      sessionStorage.setItem(snapshotKey, JSON.stringify({ cachedAt: Date.now(), source: 'vps', target: target, workspaceRoots: (meta.projects && meta.projects.roots) || [] }))
     }
     function label(value) {
       const map = {
@@ -497,38 +448,138 @@ function launchPage(target, clientID, initial) {
 function sessionSyncRuntime() {
   return `<script id="oc-tailnet-sync-runtime">;(() => {
     if (window.__ocTailnetSync) return
-    window.__ocTailnetSync = true
-    const key = 'oc-tailnet-sync:last-reload'
-    const query = (path) => {
-      const next = new URLSearchParams(location.search)
-      const text = next.toString()
-      return text ? path + '?' + text : path
+    const q = new URLSearchParams(location.search)
+    const host = q.get('host')
+    const port = q.get('port')
+    const client = q.get('client')
+    if (!host || !port || !client) {
+      window.__ocTailnetSync = { mode: 'missing-target' }
+      return
     }
-    const paint = () => {}
-    const act = async () => {
-      const res = await fetch(query('/__oc/progress'), { credentials: 'same-origin', cache: 'no-store' })
-      const data = await res.json()
-      if (data.lastAction === 'soft-refresh' && data.syncState === 'stale') {
-        const last = Number(sessionStorage.getItem(key) || '0')
-        if (Date.now() - last > 1500) {
-          sessionStorage.setItem(key, String(Date.now()))
-          location.replace(location.pathname + location.search)
-        }
+    const dirToken = location.pathname.split('/')[1] || ''
+    const sessionID = decodeURIComponent(location.pathname.split('/')[3] || '')
+    const keyBase = 'oc-tailnet-sync:' + encodeURIComponent(dirToken || 'global') + ':' + encodeURIComponent(sessionID || 'none')
+    const key = keyBase + ':last-action'
+    const minGap = 2000
+    const msgKey = keyBase + ':last-head'
+    const startedAt = Date.now()
+    const base = '?host=' + encodeURIComponent(host) + '&port=' + encodeURIComponent(port) + '&client=' + encodeURIComponent(client)
+    const withBase = (path) => path + (path.includes('?') ? '&' : '?') + 'host=' + encodeURIComponent(host) + '&port=' + encodeURIComponent(port) + '&client=' + encodeURIComponent(client)
+    const decode = (input) => {
+      try {
+        const text = input.replace(/-/g, '+').replace(/_/g, '/')
+        const pad = text.length % 4 ? '='.repeat(4 - (text.length % 4)) : ''
+        return decodeURIComponent(escape(atob(text + pad)))
+      } catch {
+        return ''
+      }
+    }
+    const directory = decode(dirToken)
+    const decodeDir = decode
+    const nextUrl = (launch) => '/' + launch.directory + '/session/' + encodeURIComponent(launch.sessionID) + '?host=' + encodeURIComponent(host) + '&port=' + encodeURIComponent(port) + '&client=' + encodeURIComponent(launch.client || client)
+    const sameLaunch = (launch) => nextUrl(launch) === location.pathname + location.search
+    // Never let sync recovery jump the browser into a different workspace.
+    const workspaceMismatch = (launch) => {
+      const currentDir = location.pathname.split('/')[1] || ''
+      const launchDir = launch?.directory || ''
+      try {
+        return decodeDir(currentDir) !== decodeDir(launchDir)
+      } catch {
+        return false
+      }
+    }
+    const ready = () => document.visibilityState === 'visible' && document.hasFocus()
+    const recent = (action) => {
+      try {
+        const last = JSON.parse(sessionStorage.getItem(key) || '{}')
+        return last.action === action && Date.now() - Number(last.at || 0) < minGap
+      } catch {
+        return false
+      }
+    }
+    const mark = (action) => sessionStorage.setItem(key, JSON.stringify({ action, at: Date.now() }))
+    const head = () => {
+      try {
+        return JSON.parse(sessionStorage.getItem(msgKey) || 'null')
+      } catch {
+        return null
+      }
+    }
+    const setHead = (value) => sessionStorage.setItem(msgKey, JSON.stringify(value))
+    const fetchJson = async (path) => {
+      const res = await fetch(withBase(path), { credentials: 'same-origin', cache: 'no-store' })
+      return await res.json()
+    }
+    const withView = (path) => {
+      if (!directory || !sessionID) return path
+      return path + (path.includes('?') ? '&' : '?') + 'directory=' + encodeURIComponent(directory) + '&sessionID=' + encodeURIComponent(sessionID)
+    }
+    const checkHead = async () => {
+      if (!directory || !sessionID) return
+      const res = await fetch(withBase('/session/' + encodeURIComponent(sessionID) + '/message?limit=80&directory=' + encodeURIComponent(directory)), { credentials: 'same-origin', cache: 'no-store' })
+      if (!res.ok) return
+      const rows = await res.json()
+      if (!Array.isArray(rows)) return
+      const tail = rows.length ? rows[rows.length - 1] : null
+      const next = { count: rows.length, tailID: tail?.info?.id || tail?.id || null }
+      const prev = head()
+      setHead(next)
+      if (!prev) return
+      if (Date.now() - startedAt < 10000) return
+      if (prev.count === next.count && prev.tailID === next.tailID) return
+      if (window.__ocTailnetSync?.state === 'protected' || window.__ocTailnetSync?.lastAction === 'defer') return
+      if (recent('soft-refresh') || recent('re-enter')) return
+      mark('soft-refresh')
+      location.replace(location.pathname + location.search)
+    }
+    const apply = async () => {
+      const data = await fetchJson(withView('/__oc/progress'))
+      window.__ocTailnetSync.state = data.syncState || 'live'
+      window.__ocTailnetSync.lastAction = data.lastAction || 'noop'
+      window.__ocTailnetSync.staleReason = data.staleReason || null
+      if (!ready()) return
+      if (data.lastAction === 'soft-refresh' && data.syncState === 'stale' && !recent('soft-refresh') && (!data.launch || !workspaceMismatch(data.launch))) {
+        mark('soft-refresh')
+        location.replace(location.pathname + location.search)
         return
       }
-      if (data.lastAction === 're-enter' && data.launch) {
-        location.replace('/' + data.launch.directory + '/session/' + encodeURIComponent(data.launch.sessionID)
-          + '?host=' + encodeURIComponent(data.target.host)
-          + '&port=' + encodeURIComponent(data.target.port)
-          + '&client=' + encodeURIComponent(data.launch.client))
+      if (data.lastAction === 're-enter' && data.launch && !sameLaunch(data.launch) && !recent('re-enter') && !workspaceMismatch(data.launch)) {
+        mark('re-enter')
+        location.replace(nextUrl(data.launch))
       }
     }
-    const stream = new EventSource(query('/__oc/events'))
-    stream.addEventListener('sync-stale', () => { void act() })
-    stream.addEventListener('target-health-changed', () => { void act() })
-    window.addEventListener('focus', () => { void act() })
-    setInterval(() => { void act() }, 1500)
-    void act()
+    let lastHeadCheck = 0
+    const pulse = (withHead = false) => {
+      void apply()
+      if (!withHead) return
+      const nowTs = Date.now()
+      if (nowTs - lastHeadCheck < 12000) return
+      lastHeadCheck = nowTs
+      void checkHead()
+    }
+     window.__ocTailnetSync = { mode: 'active', state: 'live', lastAction: 'noop', staleReason: null }
+     const stream = new EventSource('/__oc/events' + base)
+     stream.addEventListener('sync-stale', () => pulse(true))
+     stream.addEventListener('message-appended', () => pulse(true))
+     stream.addEventListener('target-health-changed', () => pulse(false))
+     stream.onerror = () => pulse(true)
+     document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') pulse(true) })
+     window.addEventListener('focus', () => pulse(true))
+     setInterval(() => pulse(true), 15000)
+     void checkHead()
+     void apply()
+     window.__ocTailnetSyncUI = {
+       shouldShow: () => {
+         const state = window.__ocTailnetSync?.state || 'live'
+         return state !== 'live'
+       },
+       visibility: () => {
+         const state = window.__ocTailnetSync?.state || 'live'
+         if (state === 'live') return 'hidden'
+         if (state === 'stale' || state === 'protected' || state === 'offline' || state === 'error') return 'visible'
+         return 'hidden'
+       },
+     }
   })();</script>`
 }
 

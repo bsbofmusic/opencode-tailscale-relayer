@@ -1,30 +1,49 @@
 "use strict"
 
 const { backgroundWarmPaused, setLastReason, setClientHeads, setSyncState } = require("../state")
-const { cacheKey, uniqueDirectories } = require("../util")
+const { cacheKey } = require("../util")
 const { emitTargetEvent } = require("./bus")
 const { saveStateCache } = require("./disk-cache")
 
 async function tickWatcher(state, config) {
+  // Watcher must NEVER reset client view — client view authority belongs to the browser session runtime
   if (state.watcherBusy || !state.meta?.ready || !state.clients.size) return
   if (state.promise) return
   if (state.backoffUntil && state.backoffUntil > Date.now()) return
   state.watcherBusy = true
-  const { fetchJson, fetchJsonWith, buildMeta, rememberList } = require("../warm")
+  const { fetchJson, fetchJsonWith, buildWorkspaceRoots, buildSessionIndex, buildMeta, fetchAllWorkspaceRoots, projectInventory } = require("../warm")
   try {
     const protectedMode = backgroundWarmPaused(state)
     const wasOffline = state.offline
     const health = await fetchJson(state.target, "/global/health", config)
-    const sessions = await fetchJsonWith(state.target, `/session?limit=${config.directoryDiscoveryLimit || config.maxSessions || 80}`, { state, priority: "background", heavy: true }, config)
+    const sessionLimit = Number(config.watcherSessionLimit || Math.min(config.directoryDiscoveryLimit || config.maxSessions || 80, 120))
+    const sessions = await fetchJsonWith(state.target, `/session?limit=${sessionLimit}`, { state, priority: "background", heavy: true }, config)
+    let inventory = state.inventory
+    try {
+      const projects = await fetchJsonWith(state.target, "/project", { state, priority: "background" }, config)
+      inventory = Array.isArray(projects.data) ? projects.data : state.inventory
+      // Don't overwrite state.inventory here — will synthesize with extraRoots first
+      state.inventoryAt = Date.now()
+    } catch {}
 
     state.offline = false
     state.offlineReason = null
 
     const prevList = JSON.stringify(state.sessionList)
-    state.sessionList = Array.isArray(sessions.data) ? sessions.data : []
-    state.meta = buildMeta(state.target, health.data, state.sessionList, health.latencyMs, config)
+    const discoveryList = Array.isArray(sessions.data) ? sessions.data : []
+    inventory = projectInventory(inventory, buildWorkspaceRoots(inventory, discoveryList, config.extraRoots))
+    state.inventory = inventory
+    state.sessionList = discoveryList
+    await fetchAllWorkspaceRoots(state, state.target, config)
+    const roots = buildWorkspaceRoots(state.inventory, discoveryList, config.extraRoots)
+    state.sessionList = buildSessionIndex(roots, state.inventory, state.workspaceSessions, discoveryList, config.maxSessions || 80)
+    state.meta = buildMeta(state.target, health.data, discoveryList, state.inventory, state.workspaceSessions, health.latencyMs, config)
     state.metaAt = Date.now()
-    for (const dir of uniqueDirectories(state.sessionList, config.maxProjects || 12)) rememberList(state, dir, 55)
+    state.targetStatus = state.meta.ready ? "ready" : "no-session"
+    state.failureReason = state.meta.ready ? null : state.meta.sessions.error
+    state.availabilityAt = Date.now()
+    state.failureCount = 0
+    state.backoffUntil = 0
 
     if (prevList !== JSON.stringify(state.sessionList)) {
       emitTargetEvent(state.target, "session-list-updated", {
@@ -33,7 +52,7 @@ async function tickWatcher(state, config) {
       })
     }
 
-    const entries = protectedMode ? activeEntries(state) : [...state.messages.entries()]
+    const entries = trackedEntries(state)
     for (const [entryKey, entry] of entries) {
       const next = await fetchJsonWith(
         state.target,
@@ -48,6 +67,7 @@ async function tickWatcher(state, config) {
       const nextCount = nextHead.messageCount
       state.messages.set(entryKey, {
         ...entry,
+        baseline: false,
         body: next.text,
         type: "application/json",
         at: Date.now(),
@@ -60,11 +80,9 @@ async function tickWatcher(state, config) {
         nextCount,
       })
       for (const client of state.clients.values()) {
-        const view = client.view || (client.activeSessionID && client.activeDirectory
-          ? { sessionID: client.activeSessionID, directory: client.activeDirectory }
-          : null)
-        if (!view) continue
-        if (view.sessionID !== entry.sessionID || view.directory !== entry.directory) continue
+        const clientSession = clientTrackedSession(client)
+        if (!clientSession) continue
+        if (clientSession.sessionID !== entry.sessionID || clientSession.directory !== entry.directory) continue
         if (sameHead(prevHead, nextHead)) continue
         if (entry.baseline) {
           setClientHeads(state, client, nextHead, nextHead)
@@ -149,16 +167,31 @@ function sameHead(a, b) {
   )
 }
 
-function activeEntries(state) {
+function clientTrackedSession(client) {
+  if (client.activeSessionID && client.activeDirectory) {
+    return {
+      sessionID: client.activeSessionID,
+      directory: client.activeDirectory,
+    }
+  }
+  if (client.view?.sessionID && client.view?.directory) {
+    return {
+      sessionID: client.view.sessionID,
+      directory: client.view.directory,
+    }
+  }
+  return null
+}
+
+function trackedEntries(state) {
   const entries = new Map()
   for (const client of state.clients.values()) {
-    const sessionID = client.activeSessionID || client.view?.sessionID
-    const directory = client.activeDirectory || client.view?.directory
-    if (!sessionID || !directory) continue
-    const key = cacheKey(directory, sessionID, 80)
+    const session = clientTrackedSession(client)
+    if (!session) continue
+    const key = cacheKey(session.directory, session.sessionID, 80)
     entries.set(key, state.messages.get(key) || {
-      sessionID,
-      directory,
+      sessionID: session.sessionID,
+      directory: session.directory,
       limit: 80,
       body: "[]",
       at: 0,

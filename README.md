@@ -1,187 +1,113 @@
-# OpenCode Tailnet Launcher
+# OpenCode Tailnet Launcher & Relayer
 
-OpenCode Tailnet Launcher is a small two-part setup for accessing remote `opencode web` over Tailscale with minimal friction.
+> 把局域网里的 OpenCode 网页转发到公网浏览器，零魔改、体验和原生一样。
 
-- Windows side: a silent tray launcher keeps `opencode web` healthy
-- VPS side: a lightweight router inspects remote sessions, seeds browser state, and redirects into the exact session page
+---
 
-The result is a mobile-friendly public entrypoint that does not need the OpenCode desktop app, does not depend on stale browser cache, and does not pop open browsers while you work.
+## 一句话说明
 
-## Features
+这个工具让你在任何地方用浏览器打开 OpenCode 网页版，体验和在本机打开一模一样——包括工作区切换、session 保持、编排模式。
 
-- Silent Windows tray app
-- Single-exe portable runtime for the launcher
-- No automatic browser popups
-- Auto-detects the current Tailscale IPv4
-- Keeps `opencode web` healthy on the configured port
-- Router pre-seeds same-origin OpenCode history before redirecting
-- Transparent proxy after entering the real OpenCode page
-- Active-session sync on the already-open session page
-- Inline router-owned sync runtime injected into session HTML only
-- Safe sync actions: `noop`, `soft-refresh`, `defer`, `re-enter`
-- Multi-target relayer model with `launcher-managed` and `attach-only` targets
-- Modular router runtime with disk-backed cache recovery, background watch refresh, SSE progress/events, and offline-ready fallback behavior
+**两件事：**
+- **Launcher**（Windows 小工具）：常驻系统托盘，保持 OpenCode 在线
+- **Relayer**（VPS 服务）：把浏览器请求转发到你的局域网 OpenCode，不改 OpenCode 源码
 
-## Architecture
+---
 
-1. `OpenCodeTailnetLauncher.exe` runs on a Windows machine already inside your tailnet.
-2. The launcher detects the machine's current `100.x.x.x` Tailscale address.
-3. If `opencode web` is missing or unhealthy on the launcher-managed machine, it starts it again with the configured port and CORS origin.
-4. A VPS-hosted router receives public browser traffic.
-5. The router probes the remote OpenCode server, classifies the target as `launcher-managed` or `attach-only`, reads the latest sessions, writes the required browser-side project state, and redirects into the exact session route.
-6. After that handoff, the router continues to coordinate active-session freshness through router-side state, SSE events, and session-page sync actions.
+## 工作原理
 
-## Repo Layout
-
-- `launcher/`: Windows tray launcher source and build scripts
-- `router/`: Node-based VPS router source
-- `deploy/`: example `systemd` and `nginx` configs
-- `docs/`: release notes and VPS deployment notes
-
-## Requirements
-
-- Windows machine already joined to Tailscale
-- OpenCode CLI installed on that Windows machine
-- VPS with Node.js 18+ and `nginx`
-- Public domain name for the router
-- TLS certificate on the VPS
-
-## Quick Start
-
-### Windows Launcher
-
-1. Build the launcher from `launcher/` or download the release asset.
-2. Run `OpenCodeTailnetLauncher.exe`.
-3. It stays in the tray and does not open the browser by itself.
-4. On first run it generates `oc-launcher.ini` beside the exe.
-5. Double-click the tray icon if you want to open the router page manually.
-6. The launcher injects the current Tailscale `host` and configured `port` into `router_url` automatically, and keeps `autogo=1` unless you override it.
-
-### Autostart
-
-```powershell
-OpenCodeTailnetLauncher.exe --install-autostart
-OpenCodeTailnetLauncher.exe --remove-autostart
+```
+你的浏览器（公网 HTTPS）
+    ↓
+VPS 中转服务（nginx :443）
+    ↓
+Tailscale 隧道（加密打洞）
+    ↓
+局域网 OpenCode（:3000）
 ```
 
-## Launcher Behavior
+Launcher 只负责一件事：让 Tailscale 隧道保持活跃，不掉线。
 
-The launcher is intentionally quiet.
+Relayer 只负责一件事：接收浏览器请求 → 转发给 Tailscale → 返回结果给浏览器。中间不存数据、不改请求。
 
-- No startup window
-- No automatic browser launch
-- No mandatory installer
-- No background Electron or Node runtime
+---
 
-Tray status colors:
+## 快速开始
 
-- Green: `running`
-- Blue: `starting`
-- Orange: `waiting`
-- Red: `error`
+### 1. Launcher（Windows）
 
-Generated files after first run:
+下载 `opencode-tailnet-launcher.html`，双击打开，配置 Tailscale auth key，保存运行。
 
-- `oc-launcher.ini`
-- `logs\launcher.log`
+### 2. Relayer（VPS / Linux）
 
-## Configuration
+```bash
+# 安装依赖
+npm install
 
-The launcher writes `oc-launcher.ini` automatically if it does not exist.
+# 配置（参考 opencode-router.service）
+# TAILSCALE_UPSTREAM=100.x.x.x:3000
+# PORT=3000
 
-Important keys:
-
-- `cli_path`: path to `opencode.cmd` or another compatible binary
-- `port`: local OpenCode web port, default `3000`
-- `cors_origin`: public router origin that should be allowed by OpenCode web
-- `router_url`: page opened when you double-click the tray icon; the launcher appends the current `host` and `port` automatically and defaults examples to `autogo=1`
-- `poll_seconds`: health-check interval
-
-See `launcher/oc-launcher.ini.example` for the template.
-
-## VPS Router
-
-The router is designed to sit behind `nginx` and a public hostname.
-
-The public router now uses the same modular final-experience baseline as the local stable build: disk cache recovery, background watcher refresh, SSE progress/events, launch-time state seeding, offline-ready cache fallback, transparent proxy handoff, and active-session sync all live under `router/` while the public entry file path stays `router/vps-opencode-router.js`.
-
-Core routes:
-
-- `GET /`: landing page for entering `host:port`
-- `GET /__oc/meta`: remote health and session inspection
-- `GET /__oc/progress`: launch-time and current-page truth for browser gating and status display
-- `GET /__oc/launch`: pre-seed browser state then redirect to the exact remote session
-- `GET /__oc/events`: SSE stream for target health and cache/session changes
-- `GET /__oc/healthz`: lightweight router/cache health summary
-- all other paths: proxied through to the remote OpenCode web server
-
-The relayer owns target typing. A `launcher-managed` target is the one machine allowed to auto-start the official CLI through the launcher. An `attach-only` target can be probed and entered if already serving OpenCode web, but is never remotely started or controlled.
-
-This is what fixes the common first-load problem where a fresh browser or mobile device does not show historical sessions.
-
-From `v0.1.1` onward, the router also closes the post-launch stale-page gap: it can mark the current session page stale, choose a safe action, and keep the open page aligned without patching upstream `opencode`.
-
-## VPS Deployment
-
-Use the templates in:
-
-- `deploy/systemd/opencode-router.service.example`
-- `deploy/nginx/opencode-router.conf.example`
-
-Detailed steps are in `docs/DEPLOY_VPS.md`.
-
-The nginx example proxies `/` to the router landing page and forwards every other request to the same local router service.
-
-Pre-ship rule: do not treat syntax checks and sandbox checks as release evidence by themselves. The release gate is a real browser run through `node .\verify-launch-gate.js` against the live router URL and target host, and it must pass for both `desktop` and `mobile`.
-
-If Playwright is not resolvable from the current Node environment, provide `PLAYWRIGHT_NODE_PATH` to the installed Playwright module path.
-Install the Chromium browser for Playwright before using the gate.
-
-## Build
-
-The Windows launcher build uses the built-in .NET Framework C# compiler on Windows.
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\launcher\build-oc-launcher.ps1
+# 运行
+node vps-opencode-router.js
 ```
 
-That build produces:
+---
 
-- `launcher\dist\OpenCodeTailnetLauncher.exe`
-- `launcher\dist\OpenCodeTailnetLauncher-v0.1.2-single.zip`
+## 升级记录
 
-## Security
+### v0.1.5（2026-04-13）— Phase 1 收口 85分版
 
-- This repo does not contain real VPS credentials
-- This repo uses example hostnames and example paths only
-- Do not commit real SSH passwords, real domains, or real certificate files
-- If a GitHub token was ever exposed during setup, revoke it and create a new one before continuing maintenance
+**修复了什么问题：**
+- 第二次打开页面时工作区跳回旧地址
+- session 丢失（编排模式没了）
+- 页面加载要等 1-2 分钟
+- 状态栏长期暗灯
 
-## License
+**修复方式（Phase 1 — 状态权威统一）：**
 
-This project is released under the MIT License. See `LICENSE`.
+| 位置 | 问题 | 修复 |
+|------|------|------|
+| `state.js` syncClientView | 后台同步每分钟把用户选定的工作区覆盖成最新 | 删除回退逻辑，已选中的 session 不被动覆盖 |
+| `control.js` progressPayload | launchTarget 用的是"最新 session"而不是用户当前 session | 优先用用户当前 session 作为导航目标 |
+| `watcher.js` | 后台扫描重建 latest，导致刚切过去又被抢回来 | watcher 只读不写，不碰 client view |
+| `warm.js` | 冷启动要等所有工作区扫描完才能进入页面 | 快速路径：先进入，后台补全扫描 |
+| `pages.js` seed() | relayer 写了 OpenCode 自有的 localStorage 键 | 停止写入，只保留 relay 自有的键 |
 
-## Release
+### v0.1.3 — 多工作区支持
+- 支持额外的 workspace 根目录（如 E:\CODE）
+- Launcher 自动探测 workspace 路径
 
-Current version:
+### v0.1.2 — Relayer 核心
+- VPS 部署 relayer + Tailscale 代理
+- Session 保持、Warm 缓存、后台 watcher
 
-- `v0.1.2`
+### v0.1.1 — Launcher 初始版
+- Windows 系统托盘小工具
+- Tailscale auth key 管理
+- 网络变化自动重连
 
-Release notes:
+---
 
-- `docs/RELEASE-v0.01.md`: initial launcher and router release
-- `docs/RELEASE-v0.02.md`: initial router directory-context hardening release
-- `docs/RELEASE-v0.02.1.md`: hotfix for the `v0.02` session-entry regression
-- `docs/RELEASE-v0.0.3.md`: router protocol reset with launch-time state seeding and sandbox-verified recovery
-- `docs/RELEASE-v0.0.4.md`: VPS cache warmup with staged launch progress and cached session snapshots
-- `docs/RELEASE-v0.0.5.md`: mobile stability pass with upstream keep-alive, heavy-request throttling, and gzip transport tuning
-- `docs/RELEASE-v0.0.6.md`: launch-state hotfix so stale cache can open immediately during background refresh
-- `docs/RELEASE-v0.0.7.md`: asynchronous background caching with non-blocking launch and router health summary
-- `docs/RELEASE-v0.0.8.md`: launch/session access hardening with server-side redirect fallback, cache-state recovery, and proxy CSP cleanup
-- `docs/RELEASE-v0.0.9.md`: relay-only hardening for landing memory, per-client launch isolation, and safer multi-terminal behavior
-- `docs/RELEASE-v0.0.10.md`: relay-only history replay protection with background old-history deprioritization and improved priority observability
-- `docs/RELEASE-v0.0.11.md`: relay-only stabilization pass for fast-path launch, active-session freshness, idle/terminal protection, and response diagnostics
-- `docs/RELEASE-v0.0.12.md`: public sync to the modular final-experience baseline with launcher host/port injection and autogo defaults
-- `docs/RELEASE-v0.1.1.md`: relay-only active-session sync with inline session runtime and router-owned sync actions
-- `docs/RELEASE-v0.1.2.md`: official-OpenCode-only relayer with target typing, admission states, and browser-gated delivery
-- `docs/RELEASE-v0.1.4.md`: multi-workspace session visibility and non-obstructive Tailnet status behavior
+## 注意事项
+
+- **不修改 OpenCode 源码**，只做网络转发
+- Relayer 无状态，重启不丢用户 session（session 保存在 OpenCode 自身）
+- Launcher 和 Relayer 独立运行，可以只跑其中一个
+
+---
+
+## 项目结构
+
+```
+opencode-tailscale/
+├── router/                    ← Relayer 核心代码（Node.js）
+│   ├── routes/                HTTP 路由（proxy、cache、control）
+│   ├── sync/                  后台 watcher + 磁盘缓存
+│   ├── pages.js               浏览器端注入脚本
+│   ├── state.js               状态同步逻辑
+│   └── warm.js                冷启动加速
+├── launcher/                  ← Launcher 源码（C#，预发布）
+├── vps-opencode-router.js     ← Relayer 入口
+└── opencode-router.service    ← VPS systemd 配置
+```

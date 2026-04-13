@@ -1,7 +1,8 @@
 "use strict"
 
-const { parseCookies, validClient, parseTarget, isSessionHtmlPath, isHeavyRequest, messageRequestInfo, createClientID } = require("./util")
-const { ensureState, ensureClientState, clientSafeMode, requestDirectory, messageBypass, relayPriority } = require("./state")
+const { parseCookies, validClient, validIp, validPort, parseTarget, isSessionHtmlPath, isHeavyRequest, messageRequestInfo, createClientID } = require("./util")
+const { ensureState, ensureClientState, clientSafeMode, requestDirectory, messageBypass, relayPriority, backgroundWarmPaused } = require("./state")
+const { fresh } = require("./util")
 
 const targetCookie = "oc_target"
 
@@ -64,6 +65,9 @@ function buildContext(req, reqUrl, states, config) {
     return ctx
   }
 
+  // These control routes intentionally stay outside per-target/per-client state.
+  // The original router answered them before target resolution, which avoids
+  // creating a synthetic shared client that can accidentally re-enter resume-safe.
   if (pathname === "/__oc/clear" || pathname === "/__oc/healthz") {
     return ctx
   }

@@ -2,7 +2,8 @@
 
 const { serveStatic } = require("./routes/static")
 const { serveLanding } = require("./routes/landing")
-const { handleControl, setTargetCookie } = require("./routes/control")
+const { handleControl } = require("./routes/control")
+const { setTargetCookie } = require("./routes/control")
 const { maybeServeCached } = require("./routes/cache")
 const { proxyRequest } = require("./routes/proxy")
 const { json } = require("./http")

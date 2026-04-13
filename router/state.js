@@ -45,10 +45,12 @@ function createState(target) {
     inventory: [],
     inventoryAt: 0,
     sessionList: [],
+    workspaceSessions: new Map(),
     lists: new Map(),
     messages: new Map(),
     details: new Map(),
     projects: new Map(),
+    bootstrap: new Map(),
     assets: new Map(),
     shellHtml: null,
     heavyActive: 0,
@@ -110,6 +112,7 @@ function createClientState(id) {
     staleReason: null,
     lastAction: "noop",
     lastActionAt: 0,
+    localSubmitUntil: 0,
     refreshFailures: 0,
     resumeSafeUntil: 0,
     resumeReason: null,
@@ -170,6 +173,7 @@ function setSyncState(client, syncState, staleReason, lastAction) {
 function syncAction(state, client) {
   if (state.offline) return "noop"
   if (client.syncState !== "stale") return "noop"
+  if (client.localSubmitUntil && client.localSubmitUntil > now()) return "defer"
   if (clientSafeMode(client) || backgroundWarmPaused(state)) return "defer"
   if (!client.view?.sessionID || !client.view?.directory) return "re-enter"
   if ((client.refreshFailures || 0) >= 2) return "re-enter"
@@ -187,12 +191,10 @@ function targetAdmission(state) {
 
 function syncClientView(state, client) {
   const latest = state.meta?.sessions?.latest
-  if (!client.view && latest?.id && latest?.directory) {
-    client.activeSessionID = client.activeSessionID || latest.id
-    client.activeDirectory = client.activeDirectory || latest.directory
+  if (!client.view && client.activeSessionID && client.activeDirectory) {
     setClientView(client, {
-      sessionID: latest.id,
-      directory: latest.directory,
+      sessionID: client.activeSessionID,
+      directory: client.activeDirectory,
       pathname: null,
     })
   }
@@ -201,18 +203,26 @@ function syncClientView(state, client) {
     if (state.offline) setSyncState(client, "offline", "target-offline", client.lastAction || "noop")
     return
   }
+  client.activeSessionID = view.sessionID
+  client.activeDirectory = view.directory
   const remoteHead = messageHead(state, view.directory, view.sessionID, 80)
-  const viewHead = client.staleReason && client.viewHead?.sessionID ? client.viewHead : remoteHead
+  const sameView = client.viewHead?.sessionID === view.sessionID && client.viewHead?.directory === view.directory
+  const localSubmit = client.localSubmitUntil && client.localSubmitUntil > now()
+  const viewHead = sameView && !localSubmit ? client.viewHead : remoteHead
   setClientHeads(state, client, viewHead, remoteHead)
   if (state.offline) {
     setSyncState(client, "offline", "target-offline", client.lastAction || "noop")
     return
   }
-  if (client.staleReason === "target-offline") {
-    setSyncState(client, "live", null, "noop")
+  if (
+    viewHead.sessionID === remoteHead.sessionID &&
+    viewHead.directory === remoteHead.directory &&
+    (viewHead.messageCount !== remoteHead.messageCount || viewHead.tailID !== remoteHead.tailID)
+  ) {
+    setSyncState(client, "stale", client.staleReason || "head-advanced", client.lastAction || "noop")
     return
   }
-  if (!client.staleReason) setSyncState(client, "live", null, client.lastAction || "noop")
+  setSyncState(client, "live", null, "noop")
 }
 
 function touchState(state) {

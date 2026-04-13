@@ -13,15 +13,16 @@ function createRouter(options) {
   const bindPort = Number(opts.port || process.env.OPENCODE_ROUTER_PORT || "33102")
 
   const config = {
-    inspectTimeoutMs: Number(process.env.OPENCODE_ROUTER_INSPECT_TIMEOUT_MS || "5000"),
-    warmTimeoutMs: Number(process.env.OPENCODE_ROUTER_WARM_TIMEOUT_MS || String(Number(process.env.OPENCODE_ROUTER_INSPECT_TIMEOUT_MS || "5000") + 2000)),
+    inspectTimeoutMs: Number(process.env.OPENCODE_ROUTER_INSPECT_TIMEOUT_MS || "8000"),
+    warmTimeoutMs: Number(process.env.OPENCODE_ROUTER_WARM_TIMEOUT_MS || String(Number(process.env.OPENCODE_ROUTER_INSPECT_TIMEOUT_MS || "8000") + 7000)),
     htmlProxyTimeoutMs: Number(process.env.OPENCODE_ROUTER_HTML_TIMEOUT_MS || "8000"),
     metaCacheMs: Number(process.env.OPENCODE_ROUTER_META_CACHE_MS || "15000"),
     snapshotCacheMs: Number(process.env.OPENCODE_ROUTER_SNAPSHOT_CACHE_MS || "45000"),
     cacheDir: process.env.OPENCODE_ROUTER_CACHE_DIR || "",
-    watchIntervalMs: Number(process.env.OPENCODE_ROUTER_WATCH_INTERVAL_MS || "1500"),
+    watchIntervalMs: Number(process.env.OPENCODE_ROUTER_WATCH_INTERVAL_MS || "5000"),
     maxSessions: 80,
-    directoryDiscoveryLimit: Number(process.env.OPENCODE_ROUTER_DIRECTORY_DISCOVERY_LIMIT || "500"),
+    directoryDiscoveryLimit: Number(process.env.OPENCODE_ROUTER_DIRECTORY_DISCOVERY_LIMIT || "120"),
+    watcherSessionLimit: Number(process.env.OPENCODE_ROUTER_WATCHER_SESSION_LIMIT || "40"),
     maxProjects: Number(process.env.OPENCODE_ROUTER_MAX_PROJECTS || "64"),
     desktopWarmSessionCount: 2,
     mobileWarmSessionCount: 1,
@@ -36,7 +37,12 @@ function createRouter(options) {
     idleRecoveryWindowMs: Number(process.env.OPENCODE_ROUTER_IDLE_RECOVERY_WINDOW_MS || "30000"),
     recoveryRetryMs: Number(process.env.OPENCODE_ROUTER_RECOVERY_RETRY_MS || "1500"),
     recoveryHtmlTimeoutMs: Number(process.env.OPENCODE_ROUTER_RECOVERY_HTML_TIMEOUT_MS || "15000"),
+    assetCacheMs: Number(process.env.OPENCODE_ROUTER_ASSET_CACHE_MS || String(24 * 60 * 60 * 1000)),
     launcherHosts: String(process.env.OPENCODE_ROUTER_LAUNCHER_HOSTS || "")
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean),
+    extraRoots: String(process.env.OPENCODE_ROUTER_EXTRA_ROOTS || "")
       .split(",")
       .map((item) => item.trim())
       .filter(Boolean),

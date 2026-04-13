@@ -1,5 +1,23 @@
+# Build artifacts
 dist/
-logs/
-*.user
-*.tmp
-*.bak
+*.exe
+*.dll
+*.zip
+
+# Cache and logs
+.cache-wip/
+*.log
+*.err
+
+# Temporary files
+.tmp-*
+IMPLEMENTATION_SUMMARY.md
+
+# IDE
+.opencode/
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

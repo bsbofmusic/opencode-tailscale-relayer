@@ -1,7 +1,7 @@
 "use strict"
 
 const http = require("http")
-const { now, fresh, uniqueDirectories, classifyError, cacheKey, dirKey } = require("./util")
+const { now, fresh, classifyError, cacheKey, dirKey } = require("./util")
 const { setWarm, warmBusy, setLastReason, backgroundWarmPaused, clientSafeMode, touchState, targetAdmission } = require("./state")
 const { runHeavy, enqueueBackground } = require("./heavy")
 const { saveStateCache } = require("./sync/disk-cache")
@@ -115,27 +115,105 @@ function projectRoots(projects) {
   return roots
 }
 
-function latestByRoot(projects, list) {
-  const { latest } = require("./util")
+function sessionStamp(item) {
+  return item?.time?.updated ?? item?.time?.created ?? 0
+}
+
+function sortSessions(list) {
+  return [...(Array.isArray(list) ? list : [])].sort((a, b) => sessionStamp(b) - sessionStamp(a))
+}
+
+function sessionRowKey(row) {
+  return `${dirKey(row?.directory)}\n${row?.id || ""}`
+}
+
+function mergeSessionRows(primary, secondary, limit) {
+  const seen = new Set()
+  const rows = []
+  for (const row of [...(Array.isArray(primary) ? primary : []), ...(Array.isArray(secondary) ? secondary : [])]) {
+    const key = sessionRowKey(row)
+    if (!row?.directory || !row?.id || seen.has(key)) continue
+    seen.add(key)
+    rows.push(row)
+    if (limit && rows.length >= limit) break
+  }
+  return rows
+}
+
+function resolveWorkspaceRoot(projects, directory) {
+  if (!directory) return ""
+  const direct = (Array.isArray(projects) ? projects : []).find((item) => dirKey(item?.worktree) === dirKey(directory))
+  if (direct?.worktree) return direct.worktree
+  const sandbox = (Array.isArray(projects) ? projects : []).find((item) => Array.isArray(item?.sandboxes) && item.sandboxes.some((entry) => dirKey(entry) === dirKey(directory)))
+  return sandbox?.worktree || directory
+}
+
+function buildWorkspaceRoots(inventory, sessionList, extraRoots) {
+  const seen = new Set()
+  const roots = []
+  const add = (directory) => {
+    const key = dirKey(directory)
+    if (!directory || seen.has(key)) return
+    seen.add(key)
+    roots.push(directory)
+  }
+  projectRoots(inventory).forEach(add)
+  for (const row of Array.isArray(sessionList) ? sessionList : []) add(resolveWorkspaceRoot(inventory, row?.directory))
+  for (const dir of Array.isArray(extraRoots) ? extraRoots : []) add(dir)
+  return roots
+}
+
+function projectInventory(projects, roots) {
+  const list = Array.isArray(projects) ? projects.slice() : []
+  const seen = new Set(projectRoots(list).map((dir) => dirKey(dir)))
+  for (const dir of Array.isArray(roots) ? roots : []) {
+    const key = dirKey(dir)
+    if (!dir || seen.has(key)) continue
+    seen.add(key)
+    list.push({
+      id: `relay:${Buffer.from(dir, "utf8").toString("base64").replace(/=+$/g, "")}`,
+      worktree: dir,
+      sandboxes: [],
+    })
+  }
+  return list
+}
+
+function workspaceSessionEntry(workspaceSessions, directory) {
+  return workspaceSessions?.get(dirKey(directory)) || null
+}
+
+function workspaceSessionRows(root, projects, workspaceSessions, fallbackList) {
+  const entry = workspaceSessionEntry(workspaceSessions, root)
+  if (entry) return sortSessions(entry.items)
+  return sortSessions((Array.isArray(fallbackList) ? fallbackList : []).filter((row) => dirKey(resolveWorkspaceRoot(projects, row?.directory)) === dirKey(root)))
+}
+
+function buildSessionIndex(roots, projects, workspaceSessions, fallbackList, limit) {
+  const rows = []
+  for (const root of Array.isArray(roots) ? roots : []) rows.push(...workspaceSessionRows(root, projects, workspaceSessions, fallbackList))
+  const merged = sortSessions(mergeSessionRows(sortSessions(rows), [], 0))
+  return typeof limit === "number" && limit > 0 ? merged.slice(0, limit) : merged
+}
+
+function latestByRoot(roots, projects, workspaceSessions, fallbackList) {
   const map = {}
-  for (const root of projectRoots(projects)) {
-    const item = latest(list.filter((row) => {
-      if (!row?.directory) return false
-      if (dirKey(row.directory) === dirKey(root)) return true
-      const proj = projects.find((p) => dirKey(p?.worktree) === dirKey(root))
-      return Array.isArray(proj?.sandboxes) && proj.sandboxes.some((item) => dirKey(item) === dirKey(row.directory))
-    }))
+  for (const root of Array.isArray(roots) ? roots : []) {
+    const item = workspaceSessionRows(root, projects, workspaceSessions, fallbackList)[0]
     if (!item?.id || !item?.directory) continue
     map[root] = { directory: item.directory, id: item.id, at: now() }
   }
   return map
 }
 
-function buildMeta(target, health, list, projects, latencyMs, config) {
+function buildMeta(target, health, list, projects, workspaceSessions, latencyMs, config) {
   const cfg = config || defaults
-  const { latest } = require("./util")
-  const root = latest(list)
-  const roots = [...new Set([...projectRoots(projects), ...uniqueDirectories(list, cfg.maxProjects)])].slice(0, cfg.maxProjects)
+  const raw = Array.isArray(projects) ? projects : []
+  const realInventory = raw.filter((item) => item && !String(item.id || "").startsWith("relay:"))
+  const roots = buildWorkspaceRoots(realInventory, list, cfg.extraRoots)
+  const inventory = projectInventory(realInventory, roots)
+  const sessionIndex = buildSessionIndex(roots, realInventory, workspaceSessions, list, cfg.maxSessions)
+  const root = sessionIndex[0] || null
   return {
     target,
     source: { kind: "cli", label: "Global CLI service" },
@@ -148,18 +226,18 @@ function buildMeta(target, health, list, projects, latencyMs, config) {
     },
     sessions: {
       ok: true,
-      count: list.length,
+      count: sessionIndex.length,
       directories: roots,
       latest: root
         ? { id: root.id || null, title: root.title || null, directory: root.directory || null }
         : null,
-      error: list.length ? null : "Target is online but has no historical sessions",
+      error: root ? null : "Target is online but has no historical sessions",
     },
     projects: {
-      count: Array.isArray(projects) ? projects.length : 0,
+      count: inventory.length,
       roots,
-      inventory: Array.isArray(projects) ? projects : [],
-      lastProjectSession: latestByRoot(projects, list),
+      inventory,
+      lastProjectSession: latestByRoot(roots, realInventory, workspaceSessions, list),
     },
     ready: Boolean(health?.healthy === true && root?.id && root?.directory),
     cache: { source: "router", cachedAt: now(), warm: true },
@@ -194,16 +272,20 @@ function metaEnvelope(state) {
     cache: { source: "router", cachedAt: now(), warm: false },
   }
   const fallbackRoots = base.sessions?.directories || []
-  const inventory = Array.isArray(state.inventory) ? state.inventory : []
-  const roots = [...new Set([...projectRoots(inventory), ...fallbackRoots])]
+  const raw = Array.isArray(state.inventory) ? state.inventory : []
+  const realInventory = raw.filter((item) => item && !String(item.id || "").startsWith("relay:"))
+  const built = buildWorkspaceRoots(realInventory, state.sessionList, state.config?.extraRoots)
+  const roots = built.length ? built : fallbackRoots
+  const inventory = projectInventory(realInventory, roots)
+  const currentProjects = {
+    count: inventory.length,
+    roots,
+    inventory,
+    lastProjectSession: latestByRoot(roots, realInventory, state.workspaceSessions, state.sessionList),
+  }
   return {
     ...base,
-    projects: base.projects || {
-      count: inventory.length,
-      roots,
-      inventory,
-      lastProjectSession: latestByRoot(inventory, state.sessionList),
-    },
+    projects: inventory.length ? currentProjects : (base.projects || currentProjects),
     targetType: state.targetType,
     targetStatus: state.targetStatus,
     admission: state.admission,
@@ -215,12 +297,75 @@ function metaEnvelope(state) {
 }
 
 function buildList(list, directory, limit) {
-  return list.filter((item) => item?.directory === directory).slice(0, limit)
+  return sortSessions(list.filter((item) => item?.directory === directory)).slice(0, limit)
 }
 
-function rememberList(state, directory, limit) {
-  const text = JSON.stringify(buildList(state.sessionList, directory, limit))
-  state.lists.set(`${directory}\n${limit}`, { body: text, type: "application/json", at: now() })
+function rememberList(state, directory, limit, list, at) {
+  const rows = Array.isArray(list) ? sortSessions(list).slice(0, limit) : buildList(state.sessionList, directory, limit)
+  const text = JSON.stringify(rows)
+  state.lists.set(`${directory}\n${limit}`, { body: text, type: "application/json", status: 200, at: at || now() })
+}
+
+function rememberWorkspaceSessions(state, directory, list, requestedLimit, config, at) {
+  const stamp = at || now()
+  const rows = sortSessions(Array.isArray(list) ? list : [])
+  const prev = workspaceSessionEntry(state.workspaceSessions, directory)
+  const authoritativeLimit = Math.max(Number(requestedLimit || rows.length || 0), Number(prev?.limit || 0))
+  const items = !rows.length
+    ? []
+    : mergeSessionRows(rows, prev?.items || [], authoritativeLimit || rows.length)
+  const entry = {
+    directory,
+    items,
+    limit: authoritativeLimit || items.length,
+    at: stamp,
+  }
+  state.workspaceSessions.set(dirKey(directory), entry)
+  rememberList(state, directory, 55, entry.items, stamp)
+  if (entry.limit && entry.limit !== 55) rememberList(state, directory, entry.limit, entry.items, stamp)
+  return entry
+}
+
+function workspaceListForLimit(state, directory, limit) {
+  const cached = state.lists.get(`${directory}\n${limit}`)
+  if (cached) return cached
+  const entry = workspaceSessionEntry(state.workspaceSessions, directory)
+  if (!entry) return null
+  const requestedLimit = Number(limit || 0)
+  const exhausted = entry.items.length < entry.limit
+  if (requestedLimit > entry.limit && !exhausted) return null
+  const synthesized = {
+    body: JSON.stringify(entry.items.slice(0, requestedLimit || entry.items.length)),
+    type: "application/json",
+    status: 200,
+    at: entry.at,
+  }
+  state.lists.set(`${directory}\n${limit}`, synthesized)
+  return synthesized
+}
+
+async function fetchWorkspaceRoot(state, target, directory, config) {
+  const cfg = config || defaults
+  const limit = Number(cfg.directoryDiscoveryLimit || cfg.maxSessions || defaults.maxSessions)
+  const path = `/session?directory=${encodeURIComponent(directory)}&roots=true&limit=${limit}`
+  const data = await fetchJsonWith(target, path, { heavy: true, state }, config)
+  const rows = Array.isArray(data.data) ? data.data : []
+  rememberWorkspaceSessions(state, directory, rows, limit, config, now())
+  return rows
+}
+
+async function fetchAllWorkspaceRoots(state, target, config) {
+  const cfg = config || {}
+  const roots = buildWorkspaceRoots(state.inventory, state.sessionList, cfg.extraRoots)
+  await Promise.all(roots.map(async (directory) => {
+    try {
+      await fetchWorkspaceRoot(state, target, directory, config)
+    } catch {
+      const fallback = state.sessionList.filter((item) => dirKey(resolveWorkspaceRoot(state.inventory, item?.directory)) === dirKey(directory))
+      if (fallback.length) rememberWorkspaceSessions(state, directory, fallback, fallback.length, config, now())
+    }
+  }))
+  return roots
 }
 
 
@@ -489,47 +634,70 @@ async function warm(state, client, force, options, config) {
     }
     let inventory = []
     try {
-      const projects = await fetchJsonWith(target, '/project', { state }, config)
+      const projects = await fetchJsonWith(target, "/project", { state }, config)
       inventory = Array.isArray(projects.data) ? projects.data : []
-      state.inventory = inventory
-      state.inventoryAt = now()
     } catch {}
-    state.sessionList = Array.isArray(sessions.data) ? sessions.data : []
-    state.meta = buildMeta(target, health.data, state.sessionList, inventory, health.latencyMs, config)
+    const discoveryList = Array.isArray(sessions.data) ? sessions.data : []
+    inventory = projectInventory(inventory, buildWorkspaceRoots(inventory, discoveryList, cfg.extraRoots))
+    state.inventory = inventory
+    state.inventoryAt = now()
+    state.config = cfg
+    state.sessionList = discoveryList
+
+    // FAST-PATH: build meta from DISCOVERY list only — do NOT wait for fetchAllWorkspaceRoots.
+    // compute latest from discoveryList using session time order (newest first)
+    const discoveryIndex = sortSessions(discoveryList)
+    const latestFromDiscovery = discoveryIndex[0] || null
+    const fastMetaReady = Boolean(health?.healthy === true && latestFromDiscovery?.id && latestFromDiscovery?.directory)
+    const fastInventory = (Array.isArray(inventory) ? inventory : []).filter(item => item && !String(item.id || "").startsWith("relay:"))
+    const fastRoots = buildWorkspaceRoots(fastInventory, discoveryList, cfg.extraRoots)
+    const fastMeta = buildMeta(target, health.data, discoveryList, fastInventory, new Map(), health.latencyMs, cfg)
+    state.meta = fastMeta
     state.metaAt = now()
-    state.targetStatus = state.meta.ready ? "ready" : "no-session"
-    state.failureReason = state.meta.ready ? null : state.meta.sessions.error
+    state.targetStatus = fastMetaReady ? "ready" : "no-session"
+    state.failureReason = fastMetaReady ? null : fastMeta.sessions.error || "No restoreable session found"
     state.admission = targetAdmission(state)
-    if (state.meta.ready) {
+    if (fastMetaReady) {
       state.failureCount = 0
       state.backoffUntil = 0
       state.availabilityAt = now()
     }
-    for (const dir of uniqueDirectories(state.sessionList, cfg.maxProjects)) rememberList(state, dir, 55)
     saveStateCache(state, config)
-    if (!state.meta.ready) {
+    if (fastMetaReady) {
+      const latestSession = fastMeta.sessions.latest
+      const nearby = discoveryList
+        .filter((item) => item?.directory === latestSession?.directory)
+        .slice(0, health.latencyMs >= cfg.slowHealthLatencyMs ? 0 : requestedSnapshotCount)
+      setWarm(client, {
+        active: false, ready: true, first: false, percent: 100, stage: "ready",
+        note: health.latencyMs >= cfg.slowHealthLatencyMs
+          ? "Upstream is slow. Opening now and background caching remaining workspaces..."
+          : client.warm.first
+            ? "Cache index is ready. Opening the latest session..."
+            : "Latest session is ready. Opening now...",
+        cachedAt: now(), latestSessionID: latestSession?.id, latestDirectory: latestSession?.directory, error: null,
+      })
+      scheduleSnapshotWarm(state, client, target, latestSession, nearby, config)
+      state.meta.cache = { source: "router", cachedAt: now(), warm: true }
+    } else {
       setWarm(client, {
         active: false, ready: false, percent: 100, stage: "done",
-        note: state.meta.sessions.error || "No restoreable session found", cachedAt: state.metaAt,
+        note: fastMeta.sessions.error || "No restoreable session found", cachedAt: state.metaAt,
       })
-      return metaEnvelope(state)
     }
-    const latestSession = state.meta.sessions.latest
-    const nearby = state.sessionList
-      .filter((item) => item?.directory === latestSession.directory)
-      .slice(0, health.latencyMs >= cfg.slowHealthLatencyMs ? 0 : requestedSnapshotCount)
-    setWarm(client, {
-      active: false, ready: true, first: false, percent: 100, stage: "ready",
-      note: health.latencyMs >= cfg.slowHealthLatencyMs
-        ? "Upstream is slow. Opening now and reducing background cache work..."
-        : client.warm.first
-          ? "Cache index is ready. Opening the latest session..."
-          : "Latest session is ready. Opening now...",
-      cachedAt: now(), latestSessionID: latestSession.id, latestDirectory: latestSession.directory, error: null,
-    })
-    scheduleSnapshotWarm(state, client, target, latestSession, nearby, config)
-    state.meta.cache = { source: "router", cachedAt: now(), warm: true }
     saveStateCache(state, config)
+
+    // BACKGROUND: fill workspaceSessions for all roots — does NOT block the fast return
+    void fetchAllWorkspaceRoots(state, target, cfg).then(() => {
+      // after background workspace roots load, rebuild sessionIndex and meta with full workspaceSessions
+      if (!state.meta?.ready) return
+      const fullRoots = buildWorkspaceRoots(fastInventory, discoveryList, cfg.extraRoots)
+      state.sessionList = buildSessionIndex(fullRoots, fastInventory, state.workspaceSessions, discoveryList, cfg.maxSessions)
+      state.meta = buildMeta(target, health.data, discoveryList, fastInventory, state.workspaceSessions, health.latencyMs, cfg)
+      state.meta.cache = { source: "router", cachedAt: now(), warm: true }
+      saveStateCache(state, cfg)
+    }).catch(() => {})
+
     return metaEnvelope(state)
   }
   const run = Promise.race([
@@ -566,10 +734,17 @@ module.exports = {
   requestText,
   fetchJson,
   fetchJsonWith,
+  buildWorkspaceRoots,
+  projectInventory,
+  buildSessionIndex,
   buildMeta,
   metaEnvelope,
   buildList,
   rememberList,
+  rememberWorkspaceSessions,
+  workspaceListForLimit,
+  fetchWorkspaceRoot,
+  fetchAllWorkspaceRoots,
   cacheMessages,
   cacheDetail,
   cacheProjectCurrent,
