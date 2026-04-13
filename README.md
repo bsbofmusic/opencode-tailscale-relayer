@@ -1,102 +1,113 @@
 # OpenCode Tailnet Launcher & Relayer
 
-## 5W What/Why/How/Who/When
-
-### What
-A portable Windows launcher + VPS relayer that bridges your local browser to remote OpenCode Web via Tailscale, without modifying OpenCode itself.
-
-### Why
-OpenCode Tailnet Launcher runs as a system tray app on Windows, keeping OpenCode alive.  
-The Relayer runs on a VPS (Ubuntu/Tailscale) and forwards browser traffic to your private network OpenCode instance — no public exposure, no auth config, no DNS.  
-Your browser talks to the relayer. The relayer talks to your private OpenCode. You get native OpenCode Web experience anywhere.
-
-### How
-
-```
-Browser (HTTPS public) 
-  → VPS Relayer (nginx :443) 
-    → Tailscale tunnel (:3000) 
-      → OpenCode Web (:3000 private)
-```
-
-### Who
-- **Launcher**: Windows users who want one-click remote access via Tailscale
-- **Relayer**: Linux VPS with Tailscale, node 18+, no OpenCode installation needed
-
-### When
-- Launch the launcher on Windows
-- The relayer is always running on VPS
-- Open browser → see your remote OpenCode
+> 把局域网里的 OpenCode 网页转发到公网浏览器，零魔改、体验和原生一样。
 
 ---
 
-## Project Structure
+## 一句话说明
+
+这个工具让你在任何地方用浏览器打开 OpenCode 网页版，体验和在本机打开一模一样——包括工作区切换、session 保持、编排模式。
+
+**两件事：**
+- **Launcher**（Windows 小工具）：常驻系统托盘，保持 OpenCode 在线
+- **Relayer**（VPS 服务）：把浏览器请求转发到你的局域网 OpenCode，不改 OpenCode 源码
+
+---
+
+## 工作原理
+
+```
+你的浏览器（公网 HTTPS）
+    ↓
+VPS 中转服务（nginx :443）
+    ↓
+Tailscale 隧道（加密打洞）
+    ↓
+局域网 OpenCode（:3000）
+```
+
+Launcher 只负责一件事：让 Tailscale 隧道保持活跃，不掉线。
+
+Relayer 只负责一件事：接收浏览器请求 → 转发给 Tailscale → 返回结果给浏览器。中间不存数据、不改请求。
+
+---
+
+## 快速开始
+
+### 1. Launcher（Windows）
+
+下载 `opencode-tailnet-launcher.html`，双击打开，配置 Tailscale auth key，保存运行。
+
+### 2. Relayer（VPS / Linux）
+
+```bash
+# 安装依赖
+npm install
+
+# 配置（参考 opencode-router.service）
+# TAILSCALE_UPSTREAM=100.x.x.x:3000
+# PORT=3000
+
+# 运行
+node vps-opencode-router.js
+```
+
+---
+
+## 升级记录
+
+### v0.1.4（2026-04-13）— Phase 1 稳定性修复
+
+**修复了什么问题：**
+- 第二次打开页面时工作区跳回旧地址
+- session 丢失（编排模式没了）
+- 页面加载要等 1-2 分钟
+- 状态栏长期暗灯
+
+**修复方式（Phase 1 — 状态权威统一）：**
+
+| 位置 | 问题 | 修复 |
+|------|------|------|
+| `state.js` syncClientView | 后台同步每分钟把用户选定的工作区覆盖成最新 | 删除回退逻辑，已选中的 session 不被动覆盖 |
+| `control.js` progressPayload | launchTarget 用的是"最新 session"而不是用户当前 session | 优先用用户当前 session 作为导航目标 |
+| `watcher.js` | 后台扫描重建 latest，导致刚切过去又被抢回来 | watcher 只读不写，不碰 client view |
+| `warm.js` | 冷启动要等所有工作区扫描完才能进入页面 | 快速路径：先进入，后台补全扫描 |
+| `pages.js` seed() | relayer 写了 OpenCode 自有的 localStorage 键 | 停止写入，只保留 relay 自有的键 |
+
+### v0.1.3 — 多工作区支持
+- 支持额外的 workspace 根目录（如 E:\CODE）
+- Launcher 自动探测 workspace 路径
+
+### v0.1.2 — Relayer 核心
+- VPS 部署 relayer + Tailscale 代理
+- Session 保持、Warm 缓存、后台 watcher
+
+### v0.1.1 — Launcher 初始版
+- Windows 系统托盘小工具
+- Tailscale auth key 管理
+- 网络变化自动重连
+
+---
+
+## 注意事项
+
+- **不修改 OpenCode 源码**，只做网络转发
+- Relayer 无状态，重启不丢用户 session（session 保存在 OpenCode 自身）
+- Launcher 和 Relayer 独立运行，可以只跑其中一个
+
+---
+
+## 项目结构
 
 ```
 opencode-tailscale/
-├── launcher/          Windows tray app source
-├── router/           VPS relayer (Node.js)
-│   ├── routes/       HTTP route handlers (proxy, cache, control)
-│   ├── sync/         Watcher + disk-cache
-│   └── pages.js       Injected browser JS runtime
-├── README.md         This file
-└── opencode-router.service  systemd unit for VPS
+├── router/                    ← Relayer 核心代码（Node.js）
+│   ├── routes/                HTTP 路由（proxy、cache、control）
+│   ├── sync/                  后台 watcher + 磁盘缓存
+│   ├── pages.js               浏览器端注入脚本
+│   ├── state.js               状态同步逻辑
+│   └── warm.js                冷启动加速
+├── launcher/                  ← Launcher 源码（C#，预发布）
+├── vps-opencode-router.js     ← Relayer 入口
+└── opencode-router.service    ← VPS systemd 配置
 ```
-
----
-
-## Phase 1 Fixes (2026-04-13) — Stability Update
-
-### What was wrong
-Multiple regressions on second-open: workspace switch rollback, session loss, composition mode missing, slow load, dark status.
-
-### Root cause
-Four relayer layers were simultaneously owning the same state with no single authority:
-1. Browser `localStorage` was being overwritten by relayer `seed()`
-2. `syncClientView()` reset active session to latest on every tick
-3. `progressPayload()` used `meta.latest` as launch target instead of browser-reported active session
-4. Watcher rebuilt `meta.sessions.latest` from synthetic workspace entries
-5. `warm()` blocked launch on full workspace scan
-
-### What was fixed
-
-| # | File | Fix |
-|---|------|-----|
-| 1 | `state.js` `syncClientView()` | Remove fallback that overwrote established `activeSessionID/activeDirectory` with `meta.latest` |
-| 2 | `control.js` `progressPayload()` | `launchTarget` computed from query-param active session first; `syncClientView` moved after |
-| 3 | `watcher.js` `tickWatcher()` | Never writes `client.view`/`activeSessionID`/`activeDirectory`; synthetic workspace guarding |
-| 4 | `pages.js` `sessionSyncRuntime()` | `workspaceMismatch()` guard blocks cross-workspace `re-enter`/`soft-refresh` |
-| 5 | `proxy.js`/`cache.js` | Synthetic `relay:*` workspaces are display-only, never enter control-plane `latest`/`roots` |
-| 6 | `warm.js` | Fast-path meta from discovery list; `fetchAllWorkspaceRoots` → background; `latest` computed from discovery first |
-| 7 | `pages.js` `seed()` | Stopped writing OpenCode-owned localStorage keys (`server`, `globalSync.project`, `layout.page`, `defaultServerUrl`) |
-
-### What was NOT modified
-- No changes to OpenCode source
-- No changes to Tailscale configuration
-- No changes to nginx upstream contract
-- Launcher is unchanged
-
----
-
-## Upgrade History
-
-### v0.1.4 (2026-04-13) — Phase 1 Stability
-- Workspace switch stability on second-open
-- Session persistence across tab reopens
-- Cold-start fast-path (no longer waits for all workspace scans)
-- OpenCode-owned localStorage preserved on relaunch
-- Relayer module-only change, no OpenCode modification
-
-### v0.1.3 — Workspace Support
-- Synthetic `relay:*` workspace injection for extra roots
-- Launcher auto-detect of workspace roots
-
-### v0.1.2 — Relayer Initial
-- VPS relayer with Tailscale proxy
-- Session persistence, warm cache, watcher background sync
-- Browser runtime injection
-
-### v0.1.0 — Launcher Initial
-- Windows tray app
-- Tailscale auth key management
-- Auto-restart on network change
