@@ -456,12 +456,7 @@ function sessionSyncRuntime() {
       window.__ocTailnetSync = { mode: 'missing-target' }
       return
     }
-    const dirToken = location.pathname.split('/')[1] || ''
-    const sessionID = decodeURIComponent(location.pathname.split('/')[3] || '')
-    const keyBase = 'oc-tailnet-sync:' + encodeURIComponent(dirToken || 'global') + ':' + encodeURIComponent(sessionID || 'none')
-    const key = keyBase + ':last-action'
     const minGap = 2000
-    const msgKey = keyBase + ':last-head'
     const startedAt = Date.now()
     const base = '?host=' + encodeURIComponent(host) + '&port=' + encodeURIComponent(port) + '&client=' + encodeURIComponent(client)
     const withBase = (path) => path + (path.includes('?') ? '&' : '?') + 'host=' + encodeURIComponent(host) + '&port=' + encodeURIComponent(port) + '&client=' + encodeURIComponent(client)
@@ -474,8 +469,29 @@ function sessionSyncRuntime() {
         return ''
       }
     }
-    const directory = decode(dirToken)
     const decodeDir = decode
+    const currentView = () => {
+      try {
+        const parts = location.pathname.split('/')
+        const dirToken = parts[1] || ''
+        if (parts[2] !== 'session') return null
+        const routeSessionID = decodeURIComponent(parts[3] || '')
+        const directory = decodeDir(dirToken)
+        if (!dirToken || !routeSessionID || !directory) return null
+        const keyBase = 'oc-tailnet-sync:' + encodeURIComponent(dirToken || 'global') + ':' + encodeURIComponent(routeSessionID || 'none')
+        return {
+          dirToken,
+          sessionID: routeSessionID,
+          directory,
+          keyBase,
+          key: keyBase + ':last-action',
+          msgKey: keyBase + ':last-head',
+          route: location.pathname + location.search,
+        }
+      } catch {
+        return null
+      }
+    }
     const nextUrl = (launch) => '/' + launch.directory + '/session/' + encodeURIComponent(launch.sessionID) + '?host=' + encodeURIComponent(host) + '&port=' + encodeURIComponent(port) + '&client=' + encodeURIComponent(launch.client || client)
     const sameLaunch = (launch) => nextUrl(launch) === location.pathname + location.search
     // Never let sync recovery jump the browser into a different workspace.
@@ -491,34 +507,50 @@ function sessionSyncRuntime() {
     const ready = () => document.visibilityState === 'visible' && document.hasFocus()
     const recent = (action) => {
       try {
-        const last = JSON.parse(sessionStorage.getItem(key) || '{}')
+        const view = currentView()
+        if (!view?.key) return false
+        const last = JSON.parse(sessionStorage.getItem(view.key) || '{}')
         return last.action === action && Date.now() - Number(last.at || 0) < minGap
       } catch {
         return false
       }
     }
-    const mark = (action) => sessionStorage.setItem(key, JSON.stringify({ action, at: Date.now() }))
+    const mark = (action) => {
+      const view = currentView()
+      if (!view?.key) return
+      sessionStorage.setItem(view.key, JSON.stringify({ action, at: Date.now() }))
+    }
     const head = () => {
       try {
-        return JSON.parse(sessionStorage.getItem(msgKey) || 'null')
+        const view = currentView()
+        if (!view?.msgKey) return null
+        return JSON.parse(sessionStorage.getItem(view.msgKey) || 'null')
       } catch {
         return null
       }
     }
-    const setHead = (value) => sessionStorage.setItem(msgKey, JSON.stringify(value))
+    const setHead = (value) => {
+      const view = currentView()
+      if (!view?.msgKey) return
+      sessionStorage.setItem(view.msgKey, JSON.stringify(value))
+    }
     const fetchJson = async (path) => {
       const res = await fetch(withBase(path), { credentials: 'same-origin', cache: 'no-store' })
       return await res.json()
     }
     const withView = (path) => {
-      if (!directory || !sessionID) return path
-      return path + (path.includes('?') ? '&' : '?') + 'directory=' + encodeURIComponent(directory) + '&sessionID=' + encodeURIComponent(sessionID)
+      const view = currentView()
+      if (!view?.directory || !view?.sessionID) return path
+      return path + (path.includes('?') ? '&' : '?') + 'directory=' + encodeURIComponent(view.directory) + '&sessionID=' + encodeURIComponent(view.sessionID)
     }
     const checkHead = async () => {
-      if (!directory || !sessionID) return
-      const res = await fetch(withBase('/session/' + encodeURIComponent(sessionID) + '/message?limit=80&directory=' + encodeURIComponent(directory)), { credentials: 'same-origin', cache: 'no-store' })
+      const view = currentView()
+      if (!view?.directory || !view?.sessionID) return
+      const routeAtStart = view.route
+      const res = await fetch(withBase('/session/' + encodeURIComponent(view.sessionID) + '/message?limit=80&directory=' + encodeURIComponent(view.directory)), { credentials: 'same-origin', cache: 'no-store' })
       if (!res.ok) return
       const rows = await res.json()
+      if ((currentView()?.route || '') !== routeAtStart) return
       if (!Array.isArray(rows)) return
       const tail = rows.length ? rows[rows.length - 1] : null
       const next = { count: rows.length, tailID: tail?.info?.id || tail?.id || null }
@@ -529,11 +561,16 @@ function sessionSyncRuntime() {
       if (prev.count === next.count && prev.tailID === next.tailID) return
       if (window.__ocTailnetSync?.state === 'protected' || window.__ocTailnetSync?.lastAction === 'defer') return
       if (recent('soft-refresh') || recent('re-enter')) return
+      if ((currentView()?.route || '') !== routeAtStart) return
       mark('soft-refresh')
       location.replace(location.pathname + location.search)
     }
     const apply = async () => {
+      const view = currentView()
+      if (!view?.directory || !view?.sessionID) return
+      const routeAtStart = view.route || ''
       const data = await fetchJson(withView('/__oc/progress'))
+      if ((currentView()?.route || '') !== routeAtStart) return
       window.__ocTailnetSync.state = data.syncState || 'live'
       window.__ocTailnetSync.lastAction = data.lastAction || 'noop'
       window.__ocTailnetSync.staleReason = data.staleReason || null
@@ -549,25 +586,59 @@ function sessionSyncRuntime() {
       }
     }
     let lastHeadCheck = 0
-    const pulse = (withHead = false) => {
-      void apply()
+    let lastHeadRoute = ''
+    const pulse = async (withHead = false) => {
+      const route = currentView()?.route || ''
+      if (route !== lastHeadRoute) {
+        lastHeadRoute = route
+        lastHeadCheck = 0
+      }
+      await apply()
       if (!withHead) return
       const nowTs = Date.now()
       if (nowTs - lastHeadCheck < 12000) return
       lastHeadCheck = nowTs
-      void checkHead()
+      await checkHead()
     }
+     const onRouteChange = (previousView) => {
+      const nextView = currentView()
+      const route = nextView?.route || ''
+      if (route !== lastHeadRoute) {
+        lastHeadRoute = route
+        lastHeadCheck = 0
+      }
+      const changedSession = Boolean(
+        previousView &&
+        nextView &&
+        (previousView.sessionID !== nextView.sessionID || previousView.directory !== nextView.directory)
+      )
+      if (changedSession) void pulse(true)
+     }
+     const originalPushState = history.pushState
+     history.pushState = function () {
+      const previousView = currentView()
+      const result = originalPushState.apply(this, arguments)
+      onRouteChange(previousView)
+      return result
+     }
+     const originalReplaceState = history.replaceState
+     history.replaceState = function () {
+      const previousView = currentView()
+      const result = originalReplaceState.apply(this, arguments)
+      onRouteChange(previousView)
+      return result
+     }
      window.__ocTailnetSync = { mode: 'active', state: 'live', lastAction: 'noop', staleReason: null }
      const stream = new EventSource('/__oc/events' + base)
-     stream.addEventListener('sync-stale', () => pulse(true))
-     stream.addEventListener('message-appended', () => pulse(true))
-     stream.addEventListener('target-health-changed', () => pulse(false))
-     stream.onerror = () => pulse(true)
-     document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') pulse(true) })
-     window.addEventListener('focus', () => pulse(true))
-     setInterval(() => pulse(true), 15000)
-     void checkHead()
-     void apply()
+     stream.addEventListener('sync-stale', () => void pulse(true))
+     stream.addEventListener('message-appended', () => void pulse(true))
+     stream.addEventListener('target-health-changed', () => void pulse(false))
+     stream.onerror = () => void pulse(true)
+     document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') void pulse(true) })
+     window.addEventListener('focus', () => void pulse(true))
+     window.addEventListener('popstate', () => onRouteChange(null))
+     setInterval(() => void pulse(true), 15000)
+     void pulse(true)
      window.__ocTailnetSyncUI = {
        shouldShow: () => {
          const state = window.__ocTailnetSync?.state || 'live'

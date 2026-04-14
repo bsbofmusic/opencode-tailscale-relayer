@@ -56,6 +56,28 @@ node vps-opencode-router.js
 
 ## 升级记录
 
+### v0.1.7（2026-04-14）— session 同步稳定性修复
+
+**这次修了什么：**
+- 两个活跃 session 来回切换时，第二个 session 偶尔会短暂显示旧消息
+- 最近一次修复后，session archive 会被 relayer 误拉回，出现“归档后复活”
+
+**这次怎么修：**
+
+只修改了 `router/pages.js` 的浏览器注入同步脚本，不碰 OpenCode upstream，也不改 relayer 的主缓存策略。
+
+1. 不再在脚本启动时固定 session/directory，而是每次都从当前 URL 动态读取
+2. `apply()` 和 `checkHead()` 都增加 route drift guard，旧请求结果不会覆盖新页面
+3. session 切换时先 `apply()` 再 `checkHead()`，减少错误刷新
+4. history 路由 hook 收紧为 **仅 session → session 切换** 时触发同步
+5. session → 非 session（例如 archive 后离开详情页）不再触发 `pulse(true)`，避免把已归档 session 拉回
+
+**验证结果：**
+- VPS 已部署
+- `/__oc/healthz` 正常
+- `/__oc/meta` 正常
+- 浏览器 smoke test 5/5 通过
+
 ### v0.1.5（2026-04-13）— Phase 1 收口 85分版
 
 **修复了什么问题：**
