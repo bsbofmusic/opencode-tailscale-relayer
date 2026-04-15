@@ -14,6 +14,10 @@ From `v0.1.2` onward, the router also classifies the target as `launcher-managed
 
 The public repo now ships the same modular router baseline as the local stable setup: disk cache recovery, background watcher refresh, SSE events, offline-ready cache fallback, and active-session sync all live under `router/` while the entry file path stays `router/vps-opencode-router.js`.
 
+If you want the shortest operator path, read this first:
+
+- `docs/QUICK_DEPLOY_CHECKLIST.md`
+
 ## Prerequisites
 
 - Linux VPS with `systemd`

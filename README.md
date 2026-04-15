@@ -62,6 +62,7 @@ node router/vps-opencode-router.js
 完整部署步骤见：
 
 - `docs/DEPLOY_VPS.md`
+- `docs/QUICK_DEPLOY_CHECKLIST.md`
 
 ### Launcher ↔ Relayer 最小契约
 
