@@ -42,6 +42,10 @@ function upstreamAuth() {
   return "Basic " + Buffer.from(`${username}:${password}`).toString("base64")
 }
 
+function invalidJson(err) {
+  return /Invalid upstream JSON/.test(String(err?.message || err || ""))
+}
+
 function requestText(target, path, headers, config) {
   const cfg = config || defaults
   return new Promise((resolve, reject) => {
@@ -94,8 +98,20 @@ async function fetchJsonWith(target, path, options, config) {
   const maxHeavy = cfg.maxHeavyRequestsPerTarget || 2
   const maxBg = Math.max(1, maxHeavy - 1)
   const res = opts.heavy && opts.state ? await runHeavy(opts.state, exec, opts.priority, maxHeavy, maxBg) : await exec()
+  let data = null
+  if (res.body) {
+    try {
+      data = JSON.parse(res.body)
+    } catch (err) {
+      const message = err && err.message ? err.message : String(err)
+      const wrapped = new Error(`Invalid upstream JSON for ${path}: ${message}`)
+      wrapped.path = path
+      wrapped.target = target
+      throw wrapped
+    }
+  }
   return {
-    data: res.body ? JSON.parse(res.body) : null,
+    data,
     text: res.body,
     latencyMs: res.latencyMs,
     headers: res.headers,
@@ -151,8 +167,10 @@ function resolveWorkspaceRoot(projects, directory) {
 function buildWorkspaceRoots(inventory, sessionList, extraRoots) {
   const seen = new Set()
   const roots = []
+  const win = windowsHint(sessionList, extraRoots)
   const add = (directory) => {
     const key = dirKey(directory)
+    if (win && (directory === "/" || directory === "\\")) return
     if (!directory || seen.has(key)) return
     seen.add(key)
     roots.push(directory)
@@ -161,6 +179,23 @@ function buildWorkspaceRoots(inventory, sessionList, extraRoots) {
   for (const row of Array.isArray(sessionList) ? sessionList : []) add(resolveWorkspaceRoot(inventory, row?.directory))
   for (const dir of Array.isArray(extraRoots) ? extraRoots : []) add(dir)
   return roots
+}
+
+function windowsHint(sessionList, extraRoots) {
+  const list = [
+    ...(Array.isArray(sessionList) ? sessionList.map((row) => row?.directory) : []),
+    ...(Array.isArray(extraRoots) ? extraRoots : []),
+  ]
+  return list.some((value) => /^[A-Za-z]:[\\/]/.test(String(value || "")))
+}
+
+function normalizeProjects(projects, sessionList, extraRoots) {
+  const list = Array.isArray(projects) ? projects.slice() : []
+  if (!windowsHint(sessionList, extraRoots)) return list
+  return list.filter((item) => {
+    const dir = String(item?.worktree || "")
+    return dir !== "/" && dir !== "\\"
+  })
 }
 
 function projectInventory(projects, roots) {
@@ -224,7 +259,7 @@ function latestByRoot(roots, projects, workspaceSessions, fallbackList) {
 
 function buildMeta(target, health, list, projects, workspaceSessions, latencyMs, config) {
   const cfg = config || defaults
-  const raw = Array.isArray(projects) ? projects : []
+  const raw = normalizeProjects(projects, list, cfg.extraRoots)
   const realInventory = raw.filter((item) => item && !String(item.id || "").startsWith("relay:"))
   const roots = buildWorkspaceRoots(realInventory, list, cfg.extraRoots)
   const inventory = projectInventory(realInventory, roots)
@@ -288,7 +323,7 @@ function metaEnvelope(state) {
     cache: { source: "router", cachedAt: now(), warm: false },
   }
   const fallbackRoots = base.sessions?.directories || []
-  const raw = Array.isArray(state.inventory) ? state.inventory : []
+  const raw = normalizeProjects(state.inventory, state.sessionList, state.config?.extraRoots)
   const realInventory = raw.filter((item) => item && !String(item.id || "").startsWith("relay:"))
   const built = buildWorkspaceRoots(realInventory, state.sessionList, state.config?.extraRoots)
   const roots = built.length ? built : fallbackRoots
@@ -653,8 +688,11 @@ async function warm(state, client, force, options, config) {
     let inventory = []
     try {
       const projects = await fetchJsonWith(target, "/project", { state }, config)
-      inventory = Array.isArray(projects.data) ? projects.data : []
-    } catch {}
+      inventory = normalizeProjects(projects.data, sessions?.data, cfg.extraRoots)
+    } catch (err) {
+      if (!invalidJson(err)) throw err
+      inventory = []
+    }
     const discoveryList = Array.isArray(sessions.data) ? sessions.data : []
     inventory = projectInventory(inventory, buildWorkspaceRoots(inventory, discoveryList, cfg.extraRoots))
     state.inventory = inventory
@@ -775,4 +813,6 @@ module.exports = {
   scheduleSnapshotWarm,
   warm,
   refresh,
+  invalidJson,
+  normalizeProjects,
 }

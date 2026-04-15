@@ -10,6 +10,7 @@ function currentProject(state, directory) {
   const hit = (Array.isArray(list) ? list : []).find((item) => String(item?.worktree || "").toLowerCase() === String(directory || "").toLowerCase())
   if (hit) return hit
   const extra = Array.isArray(state.config?.extraRoots) ? state.config.extraRoots : []
+  if (state.config?.enableSyntheticProjects === false) return null
   if (!extra.some((item) => String(item || "").toLowerCase() === String(directory || "").toLowerCase())) return null
   // Synthetic project: display-only. Must not feed back into state.meta or session latest.
   return {
@@ -29,6 +30,7 @@ function parseJsonArray(body) {
 }
 
 function rewriteProjectBody(state, body) {
+  if (state.config?.enableProjectRewrite === false) return body
   const meta = Array.isArray(state.meta?.projects?.inventory) ? state.meta.projects.inventory : null
   const seen = new Set()
   const roots = []

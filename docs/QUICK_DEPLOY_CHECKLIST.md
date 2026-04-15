@@ -172,3 +172,27 @@ curl "https://your-domain.example.com/project?host=100.x.x.x&port=3000"
 - launcher 能打开 public relayer
 - fresh browser 能看到工作区
 - 进入 session 后内容正常
+
+---
+
+## 7. 0.1.10 回退抓手
+
+如果上线 0.1.10 后行为异常，优先不要立刻回滚代码，先用环境变量关闭高风险能力：
+
+```bash
+OPENCODE_ROUTER_ENABLE_SYNC_RUNTIME=0
+OPENCODE_ROUTER_ENABLE_AUTO_SOFT_REFRESH=0
+OPENCODE_ROUTER_ENABLE_AUTO_REENTER=0
+OPENCODE_ROUTER_ENABLE_PROGRESS_QUERY_OVERRIDE=0
+OPENCODE_ROUTER_HEALTHZ_DEBUG=0
+OPENCODE_ROUTER_CACHE_MODE=memory-only
+OPENCODE_ROUTER_ENABLE_DISK_HYDRATE=0
+```
+
+然后执行：
+
+```bash
+sudo systemctl restart opencode-router.service
+```
+
+如果仍异常，再回退 git/tag 或 VPS 备份版本。

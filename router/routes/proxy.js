@@ -5,7 +5,7 @@ const { json, raw, relayHeaders } = require("../http")
 const { sessionTimeoutPage, sessionSyncRuntime } = require("../pages")
 const { clientSafeMode, clearLastReason, setLastReason, rememberActiveSession, requestDirectory, messageBypassReason, setClientHeads, setSyncState, syncAction, syncClientView } = require("../state")
 const { runHeavy } = require("../heavy")
-const { getAgent, cacheMessages, cacheProjectCurrent, fetchJsonWith, fetchWorkspaceRoot, rememberWorkspaceSessions, buildWorkspaceRoots, projectInventory } = require("../warm")
+const { getAgent, cacheMessages, cacheProjectCurrent, fetchJsonWith, fetchWorkspaceRoot, rememberWorkspaceSessions, buildWorkspaceRoots, projectInventory, normalizeProjects } = require("../warm")
 const { enqueueBackground } = require("../heavy")
 const { cleanSearch, validClient, classifyError, isHeavyRequest, isSessionHtmlPath, cacheKey, now, bootstrapKey } = require("../util")
 const { targetCookie } = require("../context")
@@ -113,7 +113,7 @@ function rewriteProjectList(state, body) {
     seen.add(key)
     roots.push(dir)
   }
-  const source = meta && meta.length ? meta : parseJsonArray(body)
+  const source = normalizeProjects(meta && meta.length ? meta : parseJsonArray(body), state.sessionList, state.config?.extraRoots)
   return JSON.stringify(projectInventory(source, roots))
 }
 
@@ -122,6 +122,7 @@ function currentProject(state, directory) {
   const hit = (Array.isArray(list) ? list : []).find((item) => String(item?.worktree || '').toLowerCase() === String(directory || '').toLowerCase())
   if (hit) return hit
   const extra = Array.isArray(state.config?.extraRoots) ? state.config.extraRoots : []
+  if (state.config?.enableSyntheticProjects === false) return null
   if (!extra.some((item) => String(item || '').toLowerCase() === String(directory || '').toLowerCase())) return null
   // Synthetic project: display-only. Must not feed back into state.meta or session latest.
   return {
@@ -210,8 +211,10 @@ function proxyRequest(ctx, req, res) {
         headers["X-OC-Message-View-Session"] = client?.view?.sessionID || ""
         headers["X-OC-Message-Latest-Session"] = state.meta?.sessions?.latest?.id || ""
       }
-      delete headers["content-security-policy"]
-      delete headers["content-security-policy-report-only"]
+      if (String(config.injectMode || "legacy-strip-csp") === "legacy-strip-csp") {
+        delete headers["content-security-policy"]
+        delete headers["content-security-policy-report-only"]
+      }
       const location = rewriteLocation(headers.location, { headersHost: req.headers.host, searchParams: reqUrl.searchParams }, target)
       if (location) headers.location = location
       else delete headers.location
@@ -288,7 +291,7 @@ function proxyRequest(ctx, req, res) {
             headers: assetHeaders(headers),
           })
         }
-        if (ok && reqUrl.pathname === "/project") {
+        if (ok && reqUrl.pathname === "/project" && config.enableProjectRewrite !== false) {
           body = rewriteProjectList(state, body)
           delete headers["transfer-encoding"]
           headers["content-length"] = Buffer.byteLength(body, "utf8")
@@ -319,7 +322,7 @@ function proxyRequest(ctx, req, res) {
             client.refreshFailures = 0
           }
           if (String(headers["content-type"] || "").includes("text/html")) {
-            body = injectRuntime(body)
+            if (config.enableSyncRuntime !== false) body = injectRuntime(body, config)
             delete headers["transfer-encoding"]
             headers["content-length"] = Buffer.byteLength(body, "utf8")
             for (const assetPath of extractAssetPaths(body)) warmAsset(state, target, assetPath)
@@ -327,7 +330,7 @@ function proxyRequest(ctx, req, res) {
               const warmBootstrap = (path, keyDir = client.activeDirectory) => enqueueBackground(state, `bootstrap\n${path}\n${keyDir || ''}`, async () => {
                 const query = keyDir ? `${path}?directory=${encodeURIComponent(keyDir)}` : path
                 const data = await fetchJsonWith(target, query, { state }, config)
-                const body = path === '/project' ? rewriteProjectList(state, data.text) : data.text
+                const body = path === '/project' && config.enableProjectRewrite !== false ? rewriteProjectList(state, data.text) : data.text
                 state.bootstrap.set(bootstrapKey(path, keyDir), {
                   body,
                   type: String(data.headers?.['content-type'] || 'application/json'),
@@ -410,8 +413,8 @@ function proxyRequest(ctx, req, res) {
   runRequest()
 }
 
-function injectRuntime(body) {
-  const tag = sessionSyncRuntime()
+function injectRuntime(body, config) {
+  const tag = sessionSyncRuntime(config)
   if (body.includes("oc-tailnet-sync-runtime")) return body
   if (body.includes("</body>")) return body.replace("</body>", `${tag}</body>`)
   return `${body}${tag}`

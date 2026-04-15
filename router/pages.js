@@ -238,9 +238,13 @@ function serialize(value) {
     .replace(/\u2029/g, "\\u2029")
 }
 
-function launchPage(target, clientID, initial) {
+function launchPage(target, clientID, initial, options) {
+  const opts = options || {}
   const payload = serialize({ ...target, client: clientID })
   const initialPayload = serialize(initial || null)
+  const optionPayload = serialize({
+    enableBrowserBootstrap: opts.enableBrowserBootstrap !== false,
+  })
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -266,6 +270,7 @@ function launchPage(target, clientID, initial) {
 <body>
   <script id="oc-launch-target" type="application/json">${payload}</script>
   <script id="oc-launch-initial" type="application/json">${initialPayload}</script>
+  <script id="oc-launch-options" type="application/json">${optionPayload}</script>
   <main>
     <h1>Launching Remote OpenCode</h1>
     <p>The VPS is warming a cache so future opens do not start cold.</p>
@@ -298,6 +303,7 @@ function launchPage(target, clientID, initial) {
     let retryAfter = 450
     let usedInitial = false
     const initial = JSON.parse(document.getElementById('oc-launch-initial').textContent)
+    const options = JSON.parse(document.getElementById('oc-launch-options').textContent)
     const shownAt = Date.now()
     function read(key) { try { return JSON.parse(localStorage.getItem(key) || '{}') } catch { return {} } }
     function write(key, value) { localStorage.setItem(key, JSON.stringify(value)) }
@@ -396,6 +402,7 @@ function launchPage(target, clientID, initial) {
     function seed(meta) {
       sessionStorage.setItem(clientKey, target.client)
       sessionStorage.setItem(snapshotKey, JSON.stringify({ cachedAt: Date.now(), source: 'vps', target: target, workspaceRoots: (meta.projects && meta.projects.roots) || [] }))
+      if (!options.enableBrowserBootstrap) return
       mergeServerProjects(meta)
       mergeGlobalProject(meta)
       seedDefaultServer()
@@ -501,9 +508,15 @@ function launchPage(target, clientID, initial) {
 </html>`
 }
 
-function sessionSyncRuntime() {
+function sessionSyncRuntime(options) {
+  const opts = options || {}
+  const payload = serialize({
+    enableAutoSoftRefresh: opts.enableAutoSoftRefresh !== false,
+    enableAutoReenter: opts.enableAutoReenter !== false,
+  })
   return `<script id="oc-tailnet-sync-runtime">;(() => {
     if (window.__ocTailnetSync) return
+    const cfg = ${payload}
     const q = new URLSearchParams(location.search)
     const host = q.get('host')
     const port = q.get('port')
@@ -615,6 +628,7 @@ function sessionSyncRuntime() {
       if (!prev) return
       if (Date.now() - startedAt < 10000) return
       if (prev.count === next.count && prev.tailID === next.tailID) return
+      if (!cfg.enableAutoSoftRefresh) return
       if (window.__ocTailnetSync?.state === 'protected' || window.__ocTailnetSync?.lastAction === 'defer') return
       if (recent('soft-refresh') || recent('re-enter')) return
       if ((currentView()?.route || '') !== routeAtStart) return
@@ -631,12 +645,12 @@ function sessionSyncRuntime() {
       window.__ocTailnetSync.lastAction = data.lastAction || 'noop'
       window.__ocTailnetSync.staleReason = data.staleReason || null
       if (!ready()) return
-      if (data.lastAction === 'soft-refresh' && data.syncState === 'stale' && !recent('soft-refresh') && (!data.launch || !workspaceMismatch(data.launch))) {
+      if (cfg.enableAutoSoftRefresh && data.lastAction === 'soft-refresh' && data.syncState === 'stale' && !recent('soft-refresh') && (!data.launch || !workspaceMismatch(data.launch))) {
         mark('soft-refresh')
         location.replace(location.pathname + location.search)
         return
       }
-      if (data.lastAction === 're-enter' && data.launch && !sameLaunch(data.launch) && !recent('re-enter') && !workspaceMismatch(data.launch)) {
+      if (cfg.enableAutoReenter && data.lastAction === 're-enter' && data.launch && !sameLaunch(data.launch) && !recent('re-enter') && !workspaceMismatch(data.launch)) {
         mark('re-enter')
         location.replace(nextUrl(data.launch))
       }

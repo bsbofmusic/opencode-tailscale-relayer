@@ -127,7 +127,7 @@ function healthPayload(states) {
     const oldestMessageAgeMs = messageEntries.length
       ? Math.max(...messageEntries.map((entry) => entry?.at ? Math.max(0, Date.now() - entry.at) : 0))
       : 0
-    return {
+    const payload = {
       target: state.target,
       targetType: state.targetType,
       targetStatus: state.targetStatus,
@@ -160,18 +160,21 @@ function healthPayload(states) {
       protectedClients,
       warmStage: state.promise ? "connect" : "ready",
       stats: state.stats,
-      debug: {
+      lastReason: state.lastReason,
+      lastReasonClient: state.lastReasonClient,
+      lastError: state.lastError,
+    }
+    if (state.config?.healthzDebug) {
+      payload.debug = {
         trackedSessionsCount: trackedAll.length,
         trackedSessionsSample: tracked,
         messageEntries: messageEntries.length,
         messageEntriesBySource: bySource,
         oldestMessageAgeMs,
         diskMessageEntries: bySource.disk || 0,
-      },
-      lastReason: state.lastReason,
-      lastReasonClient: state.lastReasonClient,
-      lastError: state.lastError,
+      }
     }
+    return payload
   })
   return { ok: true, targets: summary.length, states: summary }
 }
@@ -222,14 +225,29 @@ function handleControl(ctx, req, res, states) {
     try {
       const sessionID = reqUrl.searchParams.get("sessionID")
       const directory = reqUrl.searchParams.get("directory")
-      if (sessionID && directory) {
+      const allowOverride = Boolean(config.enableProgressQueryOverride)
+      const override = allowOverride && sessionID && directory
+      if (override) {
         client.activeSessionID = sessionID
         client.activeDirectory = directory
         setClientView(client, { sessionID, directory, pathname: null })
       }
       clearLastReason(state, client)
       const cookieHeader = wantCookie ? { "Set-Cookie": `${targetCookie}=${target.host}:${target.port}; Path=/; Max-Age=2592000; SameSite=Lax` } : undefined
-      json(res, 200, progressPayload(state, client), withRelay(cookieHeader, "foreground", "control", clientSafeMode(client) ? "resume-safe-progress" : "progress"))
+      json(
+        res,
+        200,
+        progressPayload(state, client),
+        withRelay(
+          {
+            ...(cookieHeader || {}),
+            "X-OC-Progress-Override": override ? "applied" : (sessionID || directory ? "ignored" : "none"),
+          },
+          "foreground",
+          "control",
+          clientSafeMode(client) ? "resume-safe-progress" : "progress",
+        ),
+      )
     } catch (err) {
       setLastReason(state, client, "warm-failed")
       json(res, 502, { error: classifyError(err, "Warm failed") }, relayHeaders("foreground", "error", "warm-failed"))
@@ -269,7 +287,7 @@ function handleControl(ctx, req, res, states) {
         "foreground", "control",
         payload.resumeSafeMode ? "resume-safe-launch-page" : payload.launchReady ? "launch-gate-ready" : "launch-gate",
       ))
-      res.end(launchPage(target, client.id, payload))
+      res.end(launchPage(target, client.id, payload, config))
     }
     run()
     return

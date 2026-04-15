@@ -11,7 +11,7 @@ async function tickWatcher(state, config) {
   if (state.promise) return
   if (state.backoffUntil && state.backoffUntil > Date.now()) return
   state.watcherBusy = true
-  const { fetchJson, fetchJsonWith, buildWorkspaceRoots, buildSessionIndex, buildMeta, fetchAllWorkspaceRoots, projectInventory } = require("../warm")
+  const { fetchJson, fetchJsonWith, buildWorkspaceRoots, buildSessionIndex, buildMeta, fetchAllWorkspaceRoots, projectInventory, invalidJson, normalizeProjects } = require("../warm")
   try {
     const protectedMode = backgroundWarmPaused(state)
     const wasOffline = state.offline
@@ -21,10 +21,12 @@ async function tickWatcher(state, config) {
     let inventory = state.inventory
     try {
       const projects = await fetchJsonWith(state.target, "/project", { state, priority: "background" }, config)
-      inventory = Array.isArray(projects.data) ? projects.data : state.inventory
+      inventory = normalizeProjects(projects.data, sessions?.data, config.extraRoots)
       // Don't overwrite state.inventory here — will synthesize with extraRoots first
       state.inventoryAt = Date.now()
-    } catch {}
+    } catch (err) {
+      if (!invalidJson(err)) throw err
+    }
 
     state.offline = false
     state.offlineReason = null
