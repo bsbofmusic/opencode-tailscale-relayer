@@ -56,6 +56,29 @@ node vps-opencode-router.js
 
 ## 升级记录
 
+### v0.1.8（2026-04-15）— message body 稳定性止血版
+
+**这次修了什么：**
+- 切换 session 时高频切到古早对话记录
+- 冷 session 打开时容易看到旧 body
+- relayer 重启后，旧 message body 可能从磁盘恢复并复活
+
+**这次怎么修：**
+
+本次没有再继续修 `pages.js`，而是把主战场收敛到 **server-side message body 缓存语义**：
+
+1. `limit=80` 的 `/session/:id/message` 不再从 `state.messages` 直接返回，一律走 upstream 真值
+2. 其余 message cache 也不允许 stale-hit 直接返回；过期后改为 miss + refresh
+3. `message body` 不再落盘，也不再从 disk hydrate 恢复，避免古早对话复活
+4. 保留 P0 诊断信息（headers + healthz debug），继续为后续收敛根因提供证据
+
+**验证结果：**
+- VPS 已部署
+- `/__oc/healthz` 正常
+- `/__oc/meta` 正常
+- 浏览器 smoke test 5/5 通过
+- 保留可回滚到 `v0.1.7` 的 git/tag 和 VPS 备份路径
+
 ### v0.1.7（2026-04-14）— session 同步稳定性修复
 
 **这次修了什么：**
