@@ -340,9 +340,65 @@ function launchPage(target, clientID, initial) {
       if (location.hostname === '127.0.0.1' || location.hostname === 'localhost') keys.unshift('local')
       return Array.from(new Set(keys))
     }
+    function normalizeInventory(meta) {
+      const inventory = (meta && meta.projects && Array.isArray(meta.projects.inventory)) ? meta.projects.inventory : []
+      return inventory.filter(function (item) {
+        return item && typeof item === 'object' && item.worktree
+      })
+    }
+    function mergeServerProjects(meta) {
+      const inventory = normalizeInventory(meta)
+      if (!inventory.length) return
+      const roots = (meta && meta.projects && Array.isArray(meta.projects.roots)) ? meta.projects.roots : []
+      const lastProjectSession = (meta && meta.projects && meta.projects.lastProjectSession) ? meta.projects.lastProjectSession : {}
+      const server = read(serverKey)
+      const projects = { ...(server.projects || {}) }
+      const lastProject = { ...(server.lastProject || {}) }
+      serverKeys().forEach(function (key) {
+        const prev = Array.isArray(projects[key]) ? projects[key] : []
+        const byWorktree = new Map(prev.filter(function (item) { return item && item.worktree }).map(function (item) { return [item.worktree, item] }))
+        inventory.forEach(function (item) {
+          const merged = { ...(byWorktree.get(item.worktree) || {}), ...item }
+          byWorktree.set(item.worktree, merged)
+        })
+        roots.forEach(function (root) {
+          if (!root || byWorktree.has(root)) return
+          byWorktree.set(root, { id: 'relay:' + encodeDir(root), worktree: root, sandboxes: [] })
+        })
+        projects[key] = Array.from(byWorktree.values())
+        if (!lastProject[key] && inventory[0]) {
+          lastProject[key] = inventory[0].worktree
+        }
+      })
+      Object.keys(lastProjectSession || {}).forEach(function (worktree) {
+        const session = lastProjectSession[worktree]
+        if (!session || !session.directory) return
+        serverKeys().forEach(function (key) {
+          if (!lastProject[key] || lastProject[key] === worktree) lastProject[key] = session.directory
+        })
+      })
+      write(serverKey, { ...server, projects, lastProject })
+    }
+    function mergeGlobalProject(meta) {
+      const inventory = normalizeInventory(meta)
+      if (!inventory.length) return
+      const current = read(globalProjectKey)
+      if (current && current.id) return
+      const preferred = inventory.find(function (item) { return item.worktree === meta?.sessions?.latest?.directory }) || inventory[0]
+      if (!preferred) return
+      write(globalProjectKey, { ...current, id: preferred.id, worktree: preferred.worktree })
+    }
+    function seedDefaultServer() {
+      const current = localStorage.getItem(defaultServerKey)
+      if (current) return
+      localStorage.setItem(defaultServerKey, origin)
+    }
     function seed(meta) {
       sessionStorage.setItem(clientKey, target.client)
       sessionStorage.setItem(snapshotKey, JSON.stringify({ cachedAt: Date.now(), source: 'vps', target: target, workspaceRoots: (meta.projects && meta.projects.roots) || [] }))
+      mergeServerProjects(meta)
+      mergeGlobalProject(meta)
+      seedDefaultServer()
     }
     function label(value) {
       const map = {

@@ -47,17 +47,34 @@ Windows 发布物：
 
 ### 2. Relayer（VPS / Linux，本仓库）
 
+这是源码仓，不是 npm 包仓。
+
+最小启动方式：
+
 ```bash
-# 安装依赖
-npm install
-
-# 配置（参考 opencode-router.service）
-# TAILSCALE_UPSTREAM=100.x.x.x:3000
-# PORT=3000
-
-# 运行
-node vps-opencode-router.js
+# 1. 复制整个仓库到 VPS，例如 /opt/opencode-router
+# 2. 使用 systemd 模板：deploy/systemd/opencode-router.service.example
+# 3. 使用 nginx 模板：deploy/nginx/opencode-router.conf.example
+# 4. 正式入口是：router/vps-opencode-router.js
+node router/vps-opencode-router.js
 ```
+
+完整部署步骤见：
+
+- `docs/DEPLOY_VPS.md`
+
+### Launcher ↔ Relayer 最小契约
+
+要让 Windows launcher 和 relayer 联动可用，至少要满足：
+
+1. relayer 必须部署在公开 HTTPS 域名后面
+2. launcher 的 `router_url` 必须指向该域名，例如：
+   - `https://your-domain.example.com/?autogo=1`
+3. launcher 本机运行的 `opencode web` 端口要与 launcher 配置一致（默认 `3000`）
+4. 如需把某些 Tailscale 主机视为 launcher-managed 目标，应在 relayer 侧配置：
+   - `OPENCODE_ROUTER_LAUNCHER_HOSTS=100.x.x.x,100.y.y.y`
+
+没有这 4 条，别人即使把 relayer 跑起来，也不一定能和 launcher 无歧义联动成功。
 
 ---
 
@@ -85,6 +102,31 @@ node vps-opencode-router.js
 - `/__oc/meta` 正常
 - 浏览器 smoke test 5/5 通过
 - 保留可回滚到 `v0.1.7` 的 git/tag 和 VPS 备份路径
+
+### v0.1.9（2026-04-15）— 新客户端工作区恢复 + 部署文档补齐
+
+**这次修了什么：**
+- 新电脑或无痕模式打开时，看不到 `D:\CODE` / `E:\CODE` 等工作区
+- 老浏览器还能看到工作区，但 fresh browser 完全没有 workspace roots
+
+**这次怎么修：**
+
+1. 在 `router/pages.js` 的 launch seed 中恢复最小 OpenCode 兼容 bootstrap
+2. 只补 `server/projects`、`globalSync.project`、`defaultServerUrl` 三个浏览器端兼容 key
+3. 只做 workspace/project 可见性恢复，不重新接管 active session / 导航状态
+4. 同时补齐 relayer 仓的部署/联动说明，降低外部用户部署歧义
+
+**验证结果：**
+- 线上 fresh browser 已验证拿到：
+  - `opencode.global.dat:server`
+  - `opencode.global.dat:globalSync.project`
+  - `opencode.settings.dat:defaultServerUrl`
+- 新浏览器上下文已恢复显示：
+  - `D:\CODE`
+  - `D:\CODE\opencode-tailscale`
+  - `E:\CODE`
+- `/__oc/healthz` 正常
+- `/project` 正常
 
 ### v0.1.7（2026-04-14）— session 同步稳定性修复
 

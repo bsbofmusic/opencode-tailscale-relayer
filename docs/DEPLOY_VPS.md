@@ -47,6 +47,16 @@ The router works with these environment variables:
 - `OPENCODE_ROUTER_WATCH_INTERVAL_MS`: optional watcher interval for background refresh and SSE updates
 - `OPENCODE_ROUTER_LAUNCHER_HOSTS`: comma-separated list of target hosts that are allowed to be launcher-managed
 
+### When `OPENCODE_ROUTER_LAUNCHER_HOSTS` is required
+
+If you want the Windows launcher to open the public relayer URL and have that target treated as **launcher-managed**, you should set:
+
+```bash
+OPENCODE_ROUTER_LAUNCHER_HOSTS=100.x.x.x,100.y.y.y
+```
+
+Without this setting, the relayer can still run, but launcher-linked targets may fall back to generic attach/open behavior instead of launcher-managed admission.
+
 The provided templates already use those defaults.
 
 `v0.1.2` does not add a new external runtime file to deploy. The session sync runtime is injected inline into session HTML by the router itself.
@@ -205,6 +215,23 @@ This section is secondary. The release gate comes first: if `verify-launch-gate.
 5. Click `Open Remote OpenCode` to seed history and jump into the latest session.
 
 ## Troubleshooting
+
+### Fresh Browser Or Incognito Shows No Workspaces
+
+- Confirm `/__oc/meta` returns `projects.roots` and `projects.inventory`
+- Confirm `/project?host=...&port=...` returns visible worktrees such as `D:\CODE` / `E:\CODE`
+- Confirm the launch page can seed these browser keys on first open:
+  - `opencode.global.dat:server`
+  - `opencode.global.dat:globalSync.project`
+  - `opencode.settings.dat:defaultServerUrl`
+- If old browsers work but fresh browsers do not, suspect browser bootstrap compatibility rather than upstream inventory absence
+
+### Launcher Opens But Does Not Link Cleanly To Relayer
+
+- Confirm launcher `router_url` points to the public HTTPS relayer URL, for example:
+  - `https://your-domain.example.com/?autogo=1`
+- Confirm launcher `port` matches the local `opencode web` port on Windows
+- Confirm relayer has `OPENCODE_ROUTER_LAUNCHER_HOSTS` configured when launcher-managed admission is expected
 
 ### Landing Page Works But Check Fails
 
