@@ -97,6 +97,7 @@ function landingPage(target) {
     const status = document.getElementById('status')
     const meta = document.getElementById('meta')
     const clientKey = 'opencode.router.dat:client'
+    const targetKey = 'opencode.router.dat:last-target'
     const search = new URLSearchParams(location.search)
     let stream = null
     function validIp(value) {
@@ -115,6 +116,18 @@ function landingPage(target) {
     }
     function validClient(value) {
       return /^[a-zA-Z0-9_-]{8,64}$/.test(String(value || ''))
+    }
+    function readTarget() {
+      try {
+        return JSON.parse(localStorage.getItem(targetKey) || 'null')
+      } catch {
+        return null
+      }
+    }
+    function writeTarget(value) {
+      try {
+        localStorage.setItem(targetKey, JSON.stringify(value))
+      } catch {}
     }
     function client() {
       const hit = sessionStorage.getItem(clientKey)
@@ -184,6 +197,7 @@ function landingPage(target) {
     }
     async function inspect() {
       const t = target()
+      writeTarget(t)
       status.textContent = 'Reading the VPS cache and refreshing metadata...'
       const url = '/__oc/meta?host=' + encodeURIComponent(t.host) + '&port=' + encodeURIComponent(t.port) + '&client=' + encodeURIComponent(client())
       const res = await fetch(url, { credentials: 'same-origin' })
@@ -199,6 +213,7 @@ function landingPage(target) {
     async function openLatest() {
       try {
         const t = target()
+        writeTarget(t)
         status.textContent = 'Warming the VPS cache and preparing the latest session...'
         location.href = '/__oc/launch?host=' + encodeURIComponent(t.host) + '&port=' + encodeURIComponent(t.port) + '&client=' + encodeURIComponent(client())
       } catch (error) {
@@ -214,11 +229,18 @@ function landingPage(target) {
       status.textContent = ''
       meta.textContent = 'Enter a target and click Check.'
       sessionStorage.removeItem(clientKey)
+      localStorage.removeItem(targetKey)
       fetch('/__oc/clear', { method: 'POST', credentials: 'same-origin' }).catch(function () {})
       host.focus()
     })
     for (const input of [host, port]) input.addEventListener('keydown', function (event) { if (event.key === 'Enter') openLatest() })
-    if (search.get('host')) {
+    const saved = readTarget()
+    if (!search.get('host') && !host.value.trim() && saved && validIp(saved.host || '')) {
+      host.value = saved.host
+      port.value = cleanPort(String(saved.port || '3000'))
+    }
+    const seeded = host.value.trim()
+    if (search.get('host') || seeded) {
       if (search.get('autogo') === '0') {
         inspect().catch(function (error) { status.textContent = error.message || String(error) })
       } else {

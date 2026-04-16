@@ -71,7 +71,7 @@ function buildContext(req, reqUrl, states, config) {
 
   if (isStatic || isLanding) {
     if (isLanding) {
-      ctx.target = getTarget(reqUrl, req.headers, { allowEmpty: true, useCookie: false }) || { host: "", port: "3000" }
+      ctx.target = getTarget(reqUrl, req.headers, { allowEmpty: true }) || { host: "", port: "3000" }
     }
     return ctx
   }

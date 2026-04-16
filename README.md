@@ -80,6 +80,24 @@ node router/vps-opencode-router.js
 
 ## 升级记录
 
+### v0.1.14（2026-04-17）— 根路径 last-target 恢复
+
+**这次修了什么：**
+- 直接打开根路径 `https://.../` 时，只看到空壳 router 输入页
+- 用户误以为“没有 session、没有编排器、没有工作区”，其实是 landing 页面没有恢复上次 target
+
+**这次怎么修：**
+
+1. `router/context.js`：landing 根路径允许从 `oc_target` cookie 恢复 target
+2. `router/pages.js`：landing 页面在成功 `inspect/openLatest` 后保存 `last-target`
+3. 下次打开 plain root 时，如果没有 query，但本地已有 `last-target`，会自动恢复 target 并进入原本的检查/打开流程
+
+**验证结果：**
+- plain root 在已有 target 上下文时可恢复进入 app
+- browser smoke：通过
+- fresh browser / incognito：通过
+- 不破坏现有稳定门禁
+
 ### v0.1.13（2026-04-16）— 后台调度链抗压版
 
 **这次修了什么：**
