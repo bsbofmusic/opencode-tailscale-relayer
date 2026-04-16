@@ -343,7 +343,7 @@ function launchPage(target, clientID, initial) {
     function normalizeInventory(meta) {
       const inventory = (meta && meta.projects && Array.isArray(meta.projects.inventory)) ? meta.projects.inventory : []
       return inventory.filter(function (item) {
-        return item && typeof item === 'object' && item.worktree
+        return item && typeof item === 'object' && item.worktree && item.worktree !== '/' && !(item.worktree.length === 1 && item.worktree.charCodeAt(0) === 92)
       })
     }
     function mergeServerProjects(meta) {
@@ -362,6 +362,7 @@ function launchPage(target, clientID, initial) {
           byWorktree.set(item.worktree, merged)
         })
         roots.forEach(function (root) {
+          if (root === '/' || (root.length === 1 && root.charCodeAt(0) === 92)) return
           if (!root || byWorktree.has(root)) return
           byWorktree.set(root, { id: 'relay:' + encodeDir(root), worktree: root, sandboxes: [] })
         })
@@ -394,8 +395,11 @@ function launchPage(target, clientID, initial) {
       localStorage.setItem(defaultServerKey, origin)
     }
     function seed(meta) {
+      const workspaceRoots = ((meta.projects && meta.projects.roots) || []).filter(function (root) {
+        return root !== '/' && !(root && root.length === 1 && root.charCodeAt(0) === 92)
+      })
       sessionStorage.setItem(clientKey, target.client)
-      sessionStorage.setItem(snapshotKey, JSON.stringify({ cachedAt: Date.now(), source: 'vps', target: target, workspaceRoots: (meta.projects && meta.projects.roots) || [] }))
+      sessionStorage.setItem(snapshotKey, JSON.stringify({ cachedAt: Date.now(), source: 'vps', target: target, workspaceRoots }))
       mergeServerProjects(meta)
       mergeGlobalProject(meta)
       seedDefaultServer()
