@@ -36,7 +36,6 @@ function snapshotState(state) {
 }
 
 function saveStateCache(state, config) {
-  if ((config || state.config)?.cacheMode === "memory-only") return
   const file = cacheFile(config || state.config, state.target)
   if (!file) return
   pendingWrites.set(file, snapshotState(state))
@@ -69,7 +68,6 @@ function loadStateCache(target, config) {
 }
 
 function hydrateStateFromDisk(state, config) {
-  if ((config || state.config)?.enableDiskHydrate === false) return false
   const cached = loadStateCache(state.target, config || state.config)
   if (!cached) return false
   state.meta = cached.meta || undefined

@@ -13,12 +13,6 @@ function envFlag(name, fallback) {
   return !["0", "false", "False", "FALSE", "off", "OFF"].includes(String(value))
 }
 
-function envFlag(name, fallback) {
-  const value = process.env[name]
-  if (value === undefined) return fallback
-  return !["0", "false", "False", "FALSE", "off", "OFF"].includes(String(value))
-}
-
 function createRouter(options) {
   const opts = options || {}
   const bindHost = opts.host || process.env.OPENCODE_ROUTER_HOST || "127.0.0.1"

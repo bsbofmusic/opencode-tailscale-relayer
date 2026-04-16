@@ -80,6 +80,33 @@ node router/vps-opencode-router.js
 
 ## 升级记录
 
+### v0.1.10（2026-04-16）— 稳定版重建
+
+**这次修了什么：**
+- 把失控的 `0.1.10` 尝试收回，回到已验证稳定的 `v0.1.9` 运行时内核
+- 只在低爆炸面补最小 server-side 收口：
+  - `/__oc/healthz` debug 默认收口
+  - `/__oc/progress` query override 默认关闭且可观测
+  - `/project` 坏 JSON 只做局部隔离，不再放大全局故障
+- 补齐稳定版发布资产：
+  - `v0.1.9` runtime manifest
+  - rollback runbook
+  - rollout runbook
+  - stable gate scripts
+
+**这次明确没有做：**
+- 不继续扩写 `pages.js`
+- 不继续扩写 `proxy.js / cache.js / disk-cache.js`
+- 不把 message body 带回强缓存权威路线
+
+**验证结果：**
+- browser smoke：5/5 通过
+- fresh browser / incognito gate：通过
+- workspace switch：通过
+- archive 打开后不复活，archived 标记仍保留
+- `prompt_async + message?limit=80` 的 noReply 探针可单调追加用户消息
+- rollback drill：已完成，从准确 `v0.1.9` 回滚再切回候选，门禁仍通过
+
 ### v0.1.8（2026-04-15）— message body 稳定性止血版
 
 **这次修了什么：**

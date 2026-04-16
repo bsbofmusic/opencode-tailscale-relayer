@@ -6,19 +6,30 @@ const { fresh } = require("./util")
 
 const targetCookie = "oc_target"
 
+function refererUrl(headers) {
+  try {
+    const value = headers?.referer || headers?.referrer
+    if (!value) return null
+    return new URL(String(value))
+  } catch {
+    return null
+  }
+}
+
 function getTarget(reqUrl, headers, options) {
   const opts = options || {}
   const cookies = opts.useCookie === false ? {} : parseCookies(headers.cookie)
   const fromCookie = cookies[targetCookie]?.split(":")
-  const host = reqUrl.searchParams.get("host") || fromCookie?.[0] || ""
-  const port = reqUrl.searchParams.get("port") || fromCookie?.[1] || "3000"
+  const fromReferer = refererUrl(headers)
+  const host = reqUrl.searchParams.get("host") || fromReferer?.searchParams.get("host") || fromCookie?.[0] || ""
+  const port = reqUrl.searchParams.get("port") || fromReferer?.searchParams.get("port") || fromCookie?.[1] || "3000"
   if (!host) return opts.allowEmpty ? { host: "", port } : undefined
   return parseTarget(host, port)
 }
 
 function getClientID(reqUrl, options) {
   const opts = options || {}
-  const value = reqUrl.searchParams.get("client") || ""
+  const value = reqUrl.searchParams.get("client") || opts.refererClient || ""
   if (validClient(value)) return value
   if (opts.allowGenerated) return createClientID()
   return "_shared"
@@ -79,7 +90,9 @@ function buildContext(req, reqUrl, states, config) {
   ctx.state = ensureState(states, target, cfg)
 
   const allowGenerated = pathname === "/__oc/launch"
-  ctx.client = ensureClientState(ctx.state, getClientID(reqUrl, { allowGenerated }), cfg)
+  const ref = refererUrl(req.headers)
+  const refererClient = ref?.searchParams.get("client") || ""
+  ctx.client = ensureClientState(ctx.state, getClientID(reqUrl, { allowGenerated, refererClient }), cfg)
   ctx.resumeSafe = clientSafeMode(ctx.client)
 
   if (!isControl && !isUpgrade && req.method === "GET") {

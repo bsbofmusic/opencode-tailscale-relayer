@@ -1,0 +1,101 @@
+{
+  "baseline": "v0.1.9",
+  "generatedAt": "2026-04-16T06:57:20.499Z",
+  "files": [
+    {
+      "file": "vps-opencode-router.js",
+      "sha256": "cf63563764b9f1173ebb8a09c7f8872a8d46a3c987f8b9f6aaae8fb0c1b5cae0",
+      "bytes": 234
+    },
+    {
+      "file": "router/index.js",
+      "sha256": "1a7c013f84fe07a7600e64397a52e886c2749840270d8fe264411fec45df7142",
+      "bytes": 3706
+    },
+    {
+      "file": "router/pages.js",
+      "sha256": "1c6996eab418807180683cb41e784b95b96a8aa07517fd927c597c9fcdc6ca35",
+      "bytes": 34595
+    },
+    {
+      "file": "router/context.js",
+      "sha256": "8f298c887e313069d8f907c6e79af3a72d8aabdcb4dcc7e4c26220c213c5d7e8",
+      "bytes": 3700
+    },
+    {
+      "file": "router/dispatch.js",
+      "sha256": "a4de01c3ea9d66f3c6d37d5cbf2b1e67ece7cc435a6ae64f50a83085a42c8666",
+      "bytes": 1857
+    },
+    {
+      "file": "router/util.js",
+      "sha256": "77f85b5da47408e01c0798770b2dcb0511284a95837baef26525b32261d2abb1",
+      "bytes": 4237
+    },
+    {
+      "file": "router/http.js",
+      "sha256": "5e380081a7e4333571a94811ee231fcbf92ec4d7256572230214410acfe9b295",
+      "bytes": 1048
+    },
+    {
+      "file": "router/heavy.js",
+      "sha256": "7fceb8152813601c12f898ffb86dee35d3209df348787e379ae1b3d0ff44cd0c",
+      "bytes": 3086
+    },
+    {
+      "file": "router/state.js",
+      "sha256": "53522f247f7ee6af4b721b61011b8bf4b6404de6703dda8f559ffb1466fe1eff",
+      "bytes": 13099
+    },
+    {
+      "file": "router/warm.js",
+      "sha256": "14112bd558bdd4f6771cd6a33eb7d7e889cf7e1a78957c6f86a218446f335712",
+      "bytes": 28759
+    },
+    {
+      "file": "router/routes/cache.js",
+      "sha256": "1e48c62be882675c77896fd1b66525d447902de24d343f29aa753edcbef3e289",
+      "bytes": 8074
+    },
+    {
+      "file": "router/routes/control.js",
+      "sha256": "838cdadcd9a0f4f7900b233e4f86f335c38b9259df4e94ddc218155faf40dfda",
+      "bytes": 11740
+    },
+    {
+      "file": "router/routes/landing.js",
+      "sha256": "a614a9b738bccf2633b1ea7e41c77deca7614a994c6206ade41749416f8b018a",
+      "bytes": 352
+    },
+    {
+      "file": "router/routes/proxy.js",
+      "sha256": "79a39703dcb104fdce3a0522ce20ff45f7606fa26c85056f581043ac412843e0",
+      "bytes": 20022
+    },
+    {
+      "file": "router/routes/static.js",
+      "sha256": "3e30147c77f3baf5c19c03d709c30dcb22ceb49f2683ef6308ac7ba2b6e6afca",
+      "bytes": 627
+    },
+    {
+      "file": "router/routes/websocket.js",
+      "sha256": "9c1a7ec1db65eb1e90fe6a83fd655e8bc223c510b3a732ec4eb851a720886b44",
+      "bytes": 2255
+    },
+    {
+      "file": "router/sync/bus.js",
+      "sha256": "e8bdddbf713b746983e174b8296082e05b0492212be59bb03265259b16dc35c4",
+      "bytes": 735
+    },
+    {
+      "file": "router/sync/disk-cache.js",
+      "sha256": "fb04770944a0fc1830946c704ef00196e764be304b52f310d32629700332787f",
+      "bytes": 3467
+    },
+    {
+      "file": "router/sync/watcher.js",
+      "sha256": "45ad254858b82331f12661c4e5fa11e6cfd8fe1fd1e826b3beefd2819b37dc85",
+      "bytes": 8423
+    }
+  ]
+}
