@@ -1,76 +1,241 @@
-# OpenCode Tailnet Relayer v0.1.10 Plan
+# OpenCode Tailnet Relayer v0.1.10 Stable Plan
 
-## 目标
+> **Status:** Replanned after incident recovery  
+> **Baseline:** Accurate `v0.1.9` live runtime  
+> **Priority:** Stability first, zero-intrusion, rollback-first
 
-`v0.1.10` 的目标不是继续堆补丁，而是把高风险行为收口成：
+---
 
-- 可关
-- 可灰度
-- 可回退
-- 可观测
+## 1. Current Truth
 
-同时保持 **零入侵 upstream OpenCode**。
+Current live has been recovered to an accurate `v0.1.9` runtime bundle and is now the **only known-good baseline**.
 
-## 本次必做
+Verified now:
 
-1. 高风险行为 feature-flag 化
-2. `warm.js` 坏 JSON 隔离
-3. `/__oc/healthz` 默认降敏
-4. `/__oc/progress` query override 收口并可关闭
+- browser smoke: **5/5 passed**
+- fresh browser / incognito gate: **passed**
+- `healthz = ready`
+- workspace roots visible:
+  - `D:\CODE`
+  - `D:\CODE\opencode-tailscale`
+  - `E:\CODE`
 
-## 推荐环境变量
+This baseline must remain frozen while `0.1.10` is redesigned.
 
-```bash
-OPENCODE_ROUTER_ENABLE_SYNC_RUNTIME=1
-OPENCODE_ROUTER_ENABLE_BROWSER_BOOTSTRAP=1
-OPENCODE_ROUTER_ENABLE_AUTO_SOFT_REFRESH=1
-OPENCODE_ROUTER_ENABLE_AUTO_REENTER=1
-OPENCODE_ROUTER_ENABLE_PROGRESS_QUERY_OVERRIDE=1
-OPENCODE_ROUTER_HEALTHZ_DEBUG=0
-OPENCODE_ROUTER_ENABLE_PROJECT_REWRITE=1
-OPENCODE_ROUTER_ENABLE_SYNTHETIC_PROJECTS=1
-OPENCODE_ROUTER_INJECT_MODE=legacy-strip-csp
-OPENCODE_ROUTER_CACHE_MODE=disk
-OPENCODE_ROUTER_ENABLE_DISK_HYDRATE=1
-```
+---
 
-## 一键回退建议
+## 2. One-Sentence Mainline
 
-如果线上行为异常，优先回退为保守配置：
+`0.1.10` should do only one thing:
 
-```bash
-OPENCODE_ROUTER_ENABLE_SYNC_RUNTIME=0
-OPENCODE_ROUTER_ENABLE_BROWSER_BOOTSTRAP=1
-OPENCODE_ROUTER_ENABLE_AUTO_SOFT_REFRESH=0
-OPENCODE_ROUTER_ENABLE_AUTO_REENTER=0
-OPENCODE_ROUTER_ENABLE_PROGRESS_QUERY_OVERRIDE=0
-OPENCODE_ROUTER_HEALTHZ_DEBUG=0
-OPENCODE_ROUTER_ENABLE_PROJECT_REWRITE=1
-OPENCODE_ROUTER_ENABLE_SYNTHETIC_PROJECTS=1
-OPENCODE_ROUTER_INJECT_MODE=legacy-strip-csp
-OPENCODE_ROUTER_CACHE_MODE=memory-only
-OPENCODE_ROUTER_ENABLE_DISK_HYDRATE=0
-```
+> **Turn the verified `v0.1.9` runtime into a release unit that is more observable, more rollback-safe, and slightly better isolated on the server side — without touching the browser hot path again.**
 
-然后：
+This means:
 
-```bash
-sudo systemctl restart opencode-router.service
-```
+- do **not** continue patching `pages.js / proxy.js / cache.js / disk-cache.js`
+- do **not** continue experimenting in browser/runtime space
+- do **not** treat feature flags as a substitute for stability
 
-## 发布门禁
+---
 
-发布当天至少通过：
+## 3. Freeze Surface
 
-1. `/__oc/healthz` 正常
-2. `verify-launch-gate.js` desktop/mobile 双通过
-3. fresh browser / incognito 有 workspace roots
-4. session 切换不回跳、不串古早消息
-5. archive 不 revive
+## 3.1 Files that must stay frozen
 
-## 禁止项
+Do not touch these in `0.1.10`:
 
-- 不修改 upstream OpenCode
-- 不重做 `state.js` 多状态模型
-- 不把 `message body` 重新回到强缓存权威路线
-- 不扩大 watcher 写权限
+- `router/pages.js`
+- `router/routes/proxy.js`
+- `router/routes/cache.js`
+- `router/sync/disk-cache.js`
+- upstream OpenCode itself
+
+Reason:
+
+- these are the highest blast-radius surfaces
+- recent incidents proved that extending them quickly destroys the web UI
+
+## 3.2 Files that may be touched carefully
+
+Only these low-blast-radius server-side surfaces may enter `0.1.10`:
+
+- `router/routes/control.js`
+- `router/warm.js`
+- `router/sync/watcher.js`
+- deploy / systemd / nginx / rollout scripts
+- verification scripts
+- docs / runbooks / manifests
+
+---
+
+## 4. Phase Plan
+
+## P0 — Freeze and Observe
+
+### Goal
+
+Make `v0.1.9` reproducible and non-accidental.
+
+### Required actions
+
+- [ ] Export a release manifest for the exact `v0.1.9` runtime bundle
+- [ ] Record the current VPS deployment checksum / file list
+- [ ] Preserve a hard rollback target:
+  - git/tag rollback
+  - VPS file rollback
+  - cache kill-switch rollback
+- [ ] Run browser smoke twice, not once
+- [ ] Run fresh browser gate twice, not once
+
+### Exit criteria
+
+- `v0.1.9` is proven repeatable
+- rollback source is explicit and tested
+
+---
+
+## P1 — Smallest Server-Side Closure
+
+### Goal
+
+Improve server-side resilience without changing browser/runtime semantics.
+
+### Allowed changes
+
+1. **`healthz` debug gating**
+   - default minimal output
+   - detailed debug only when explicitly enabled
+
+2. **`/progress` override gating**
+   - default disabled
+   - explicit header feedback when override is attempted
+
+3. **`/project` invalid JSON local isolation**
+   - bad `/project` response must not poison the whole target state
+   - watcher should degrade locally, not globally
+
+### Not allowed
+
+- no new runtime flags
+- no browser bootstrap changes
+- no project rewrite semantic changes
+- no cache/hydrate strategy expansion
+
+### Exit criteria
+
+- all three server-side closures pass gates without changing the browser behavior envelope
+
+---
+
+## P2 — Low-Risk Reinforcement
+
+### Goal
+
+Strengthen release engineering, not runtime cleverness.
+
+### Allowed work
+
+- [ ] dual-slot deployment (A = current stable, B = candidate)
+- [ ] immutable release manifest
+- [ ] rollback script
+- [ ] cache isolation per slot/version
+- [ ] preflight checks for:
+  - service status
+  - `healthz`
+  - fresh browser workspace roots
+  - launcher ↔ relayer minimal contract
+
+### Exit criteria
+
+- release can be deployed and rolled back by script, not memory
+
+---
+
+## P3 — Rollout and Rollback
+
+### Goal
+
+Ship boldly but only because rollback is trivial.
+
+### Rollout order
+
+1. Build candidate from `v0.1.9` branch
+2. Deploy to B slot only
+3. Run all gates against B slot
+4. Observe 15–30 minutes
+5. Switch traffic to B only if all gates remain green
+6. Keep A slot intact until post-switch observation passes
+
+### Rollback order
+
+1. If page-level failure appears:
+   - immediately route back to A slot (`v0.1.9`)
+2. If only local server-side regression appears:
+   - disable new server-side flags
+   - restart service
+3. If state pollution remains:
+   - switch to memory-only
+   - disable hydrate
+   - clear relayer cache directory
+
+### Mandatory rollback handles
+
+- exact `v0.1.9` bundle
+- one-command feature kill-switch
+- cache/hydrate kill-switch
+
+---
+
+## 5. Mandatory Gates
+
+`0.1.10` is not allowed to ship unless all of the following pass:
+
+1. **browser smoke**
+   - existing smoke suite 5/5 passes
+
+2. **fresh browser / incognito gate**
+   - enters session successfully
+   - shows roots:
+     - `D:\CODE`
+     - `D:\CODE\opencode-tailscale`
+     - `E:\CODE`
+
+3. **workspace switch**
+   - switch repeatedly between `D:\CODE`, `D:\CODE\opencode-tailscale`, `E:\CODE`
+   - no jump-back
+   - no wrong session cross-over
+
+4. **archive**
+   - archive does not revive after refresh or reopen
+
+5. **message append**
+   - new messages append monotonically
+   - no old body revival
+
+6. **rollback drill**
+   - candidate → `v0.1.9` rollback must complete and restore green gates
+
+---
+
+## 6. Explicit Do-Not-Do List
+
+Do not do these in `0.1.10`:
+
+- do not extend `pages.js`
+- do not re-open `proxy.js` HTML injection logic
+- do not change message body authority rules again
+- do not add more feature-flag matrix to browser/runtime surfaces
+- do not redesign `state.js` authority model in this version
+- do not use live users as the experiment harness
+
+---
+
+## 7. Final Decision
+
+The real stable `0.1.10` should not try to be a big architecture leap.
+
+It should be:
+
+> **`v0.1.9` runtime, frozen as the known-good core, plus the smallest possible server-side resilience and rollback engineering.**
+
+Anything beyond that belongs to a later version.
