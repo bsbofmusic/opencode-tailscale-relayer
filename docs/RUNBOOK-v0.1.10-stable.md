@@ -21,6 +21,25 @@ OPENCODE_ROUTER_RECOVERY_HTML_TIMEOUT_MS=15000
 
 Do not tighten `WARM_TIMEOUT_MS` below `30000` unless the deployment has already been load-tested.
 
+## Backend pressure-control recommendation
+
+For unattended use, prefer:
+
+```bash
+OPENCODE_ROUTER_BACKGROUND_SOFT_LIMIT=12
+OPENCODE_ROUTER_MAX_BACKGROUND_QUEUE=20
+OPENCODE_ROUTER_BACKGROUND_JOB_TTL_MS=45000
+OPENCODE_ROUTER_HEAVY_BACKGROUND_SOFT_LIMIT=4
+OPENCODE_ROUTER_PROMISE_AGE_SOFT_LIMIT_MS=10000
+OPENCODE_ROUTER_WATCHER_SESSION_BUDGET=4
+OPENCODE_ROUTER_WATCHER_SESSION_BUDGET_OVERLOAD=1
+OPENCODE_ROUTER_ROOTS_REFRESH_TTL_MS=300000
+OPENCODE_ROUTER_WATCHDOG_INTERVAL_MS=15000
+OPENCODE_ROUTER_WATCHDOG_OVERLOAD_MS=60000
+```
+
+These values are the current stable defaults for preventing long-running background queue buildup.
+
 ## Allowed candidate scope
 - `router/index.js`
 - `router/routes/control.js`

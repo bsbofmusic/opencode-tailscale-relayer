@@ -618,6 +618,7 @@ async function warm(state, client, force, options, config) {
   const cfg = config || defaults
   const opts = options || {}
   const requestedSnapshotCount = opts.snapshotCount || cfg.desktopWarmSessionCount
+  const hadReadyMeta = Boolean(state.meta?.ready)
   if (state.promise) {
     setWarm(client, {
       active: true, ready: Boolean(state.meta?.ready),
@@ -745,6 +746,18 @@ async function warm(state, client, force, options, config) {
     new Promise((_, reject) => setTimeout(() => reject(new Error(`Warm timed out after ${cfg.warmTimeoutMs}ms`)), cfg.warmTimeoutMs)),
   ])
     .catch((err) => {
+      if (hadReadyMeta && /Warm timed out/.test(String(err?.message || err || ""))) {
+        setWarm(client, {
+          active: false,
+          ready: true,
+          percent: 100,
+          stage: "ready",
+          note: "Using last known good state while background refresh catches up.",
+          cachedAt: state.metaAt,
+          error: null,
+        })
+        return metaEnvelope(state)
+      }
       if (failWarm(state, client, err, "Warm refresh failed")) throw err
       return metaEnvelope(state)
     })

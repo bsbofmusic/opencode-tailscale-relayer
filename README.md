@@ -80,6 +80,50 @@ node router/vps-opencode-router.js
 
 ## 升级记录
 
+### v0.1.13（2026-04-16）— 后台调度链抗压版
+
+**这次修了什么：**
+- 压力测试下，relayer 后台会积压并最终退化到 `Warm timed out after 30000ms`
+- `clients` 与 `backgroundQueued` 在高压下不能及时回落
+- 即使前台功能还正常，后台也可能在用户离开电脑后继续恶化
+
+**这次怎么修：**
+
+1. 后台调度链只动服务端，不碰浏览器热路径：
+   - `router/index.js`
+   - `router/state.js`
+   - `router/heavy.js`
+   - `router/warm.js`
+   - `router/sync/watcher.js`
+   - `router/routes/control.js`
+2. `backgroundQueue` 增加：
+   - 硬上限
+   - TTL 过期丢弃
+   - overload 时拒绝低价值后台任务
+3. watcher 增加：
+   - stale client 裁剪
+   - tracked session 预算
+   - roots refresh TTL
+4. 新增 backend self-heal / watchdog：
+   - `schedulerMode = normal / overload / recovering`
+   - overload 时暂停低价值后台工作
+   - watchdog 到时主动 drain 后台积压
+5. 恢复成功后自动清理旧错误状态：
+   - `failureReason`
+   - `lastError`
+   - `lastReason`
+
+**压测结果：**
+- 多轮 browser smoke：通过
+- 多轮 fresh browser / incognito：通过
+- 多轮 workspace switch：通过
+- 长稳态综合压测中：
+  - `failureReason` 维持为空
+  - `lastError` 维持为空
+  - `backgroundQueued` 最终回到 0
+  - `clients` 从峰值回落
+  - `schedulerMode` 能从 `overload` 回到 `normal/recovering`
+
 ### v0.1.12（2026-04-16）— 后台恢复态清理版
 
 **这次修了什么：**
