@@ -3,6 +3,7 @@
 const fs = require("fs")
 const path = require("path")
 const { keyFor, now } = require("../util")
+const { cachePartition } = require("../version")
 
 const pendingWrites = new Map()
 const scheduledWrites = new Map()
@@ -11,7 +12,15 @@ function cacheFile(config, target) {
   const root = config?.cacheDir
   if (!root) return null
   const safe = keyFor(target).replace(/[^a-zA-Z0-9._-]+/g, "_")
-  return path.join(root, safe, "state.json")
+  const partition = cachePartition(config)
+  return path.join(
+    root,
+    `schema-${partition.cacheSchema}`,
+    `release-${partition.releaseId}`,
+    `contract-${partition.contractVersion}`,
+    safe,
+    "state.json",
+  )
 }
 
 function snapshotState(state) {

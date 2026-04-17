@@ -93,6 +93,25 @@ function assetHeaders(headers) {
   }
 }
 
+function stripHopHeaders(headers) {
+  const next = { ...(headers || {}) }
+  delete next.connection
+  delete next["Connection"]
+  delete next["keep-alive"]
+  delete next["Keep-Alive"]
+  delete next["transfer-encoding"]
+  delete next["Transfer-Encoding"]
+  delete next.upgrade
+  delete next.Upgrade
+  delete next["proxy-connection"]
+  delete next["Proxy-Connection"]
+  delete next.te
+  delete next.TE
+  delete next.trailer
+  delete next.Trailer
+  return next
+}
+
 function parseJsonArray(body) {
   try {
     const rows = JSON.parse(String(body || "[]"))
@@ -128,6 +147,10 @@ function currentProject(state, directory) {
     id: `relay:${Buffer.from(String(directory), 'utf8').toString('base64').replace(/=+$/g, '')}`,
     worktree: directory,
     sandboxes: [],
+    time: {
+      created: Date.now(),
+      updated: Date.now(),
+    },
   }
 }
 
@@ -167,8 +190,12 @@ function proxyRequest(ctx, req, res) {
   const guardHtml = req.method === "GET" && isSessionHtmlPath(reqUrl.pathname)
   const assetRequest = req.method === "GET" && /^\/(assets\/|favicon|site\.webmanifest)/.test(reqUrl.pathname)
   const messageRequest = req.method === "GET" && /^\/session\/[^/]+\/message$/.test(reqUrl.pathname)
+  const detailRequest = req.method === "GET" && /^\/session\/[^/]+$/.test(reqUrl.pathname)
+  const agentRequest = req.method === "GET" && reqUrl.pathname === "/agent"
+  const upstreamEventRequest = req.method === "GET" && reqUrl.pathname === "/global/event"
   const promptMatch = req.method === "POST" ? reqUrl.pathname.match(/^\/session\/([^/]+)\/prompt_async$/) : null
-  const bootstrapRequest = req.method === "GET" && /^\/(path|project|project\/current|session\/status|global\/config|provider|config)$/.test(reqUrl.pathname)
+  const bootstrapRequest = req.method === "GET" && /^\/(path|project|project\/current|session\/status|global\/config|provider|config|agent)$/.test(reqUrl.pathname)
+  const sensitiveStreamRequest = detailRequest || agentRequest || upstreamEventRequest
   const htmlProxyTimeoutMs = config.htmlProxyTimeoutMs || 8000
   const recoveryHtmlTimeoutMs = config.recoveryHtmlTimeoutMs || 15000
   const htmlTimeoutMs = clientSafeMode(client) ? recoveryHtmlTimeoutMs : htmlProxyTimeoutMs
@@ -176,18 +203,22 @@ function proxyRequest(ctx, req, res) {
   const maxBg = Math.max(1, maxHeavy - 1)
 
   const runRequest = () => {
+    const upstreamSearch = new URLSearchParams(reqUrl.searchParams)
+    if (directory && !upstreamSearch.get("directory") && (promptRequest || bootstrapRequest || detailRequest || messageRequest || reqUrl.pathname === "/project/current" || reqUrl.pathname === "/path")) {
+      upstreamSearch.set("directory", directory)
+    }
     const options = {
       hostname: target.host,
       port: Number(target.port),
       method: req.method,
-      path: `${reqUrl.pathname}${cleanSearch(reqUrl.searchParams)}`,
+      path: `${reqUrl.pathname}${cleanSearch(upstreamSearch)}`,
       headers: {
         ...req.headers,
         host: `${target.host}:${target.port}`,
-        connection: req.headers.upgrade ? "upgrade" : ((guardHtml || assetRequest || messageRequest || bootstrapRequest) ? "close" : "keep-alive"),
+        connection: req.headers.upgrade ? "upgrade" : ((guardHtml || assetRequest || messageRequest || bootstrapRequest || sensitiveStreamRequest) ? "close" : "keep-alive"),
         "accept-encoding": assetRequest ? String(req.headers['accept-encoding'] || 'gzip, deflate, br') : "identity",
       },
-      agent: (guardHtml || assetRequest || messageRequest || bootstrapRequest) ? false : getAgent(),
+      agent: (guardHtml || assetRequest || messageRequest || bootstrapRequest || sensitiveStreamRequest) ? false : getAgent(),
     }
     const auth = upstreamAuth()
     let finished = false
@@ -196,7 +227,7 @@ function proxyRequest(ctx, req, res) {
     if (auth && !options.headers.Authorization && !options.headers.authorization) options.headers.Authorization = auth
     const upstream = http.request(options, (up) => {
       if (finished) return
-      const headers = { ...up.headers }
+      const headers = stripHopHeaders(up.headers)
       const dir = requestDirectory(client, reqUrl)
       const msg = reqUrl.pathname.match(/^\/session\/([^/]+)\/message$/)
       const limit = Number(reqUrl.searchParams.get("limit") || "0")
@@ -257,14 +288,11 @@ function proxyRequest(ctx, req, res) {
         if (ok && promptRequest) {
           const sessionID = promptMatch ? decodeURIComponent(promptMatch[1]) : null
           const directory = requestDirectory(client, reqUrl) || [...state.clients.values()].find((peer) => {
-            const view = peer.view || (peer.activeSessionID && peer.activeDirectory ? { sessionID: peer.activeSessionID, directory: peer.activeDirectory } : null)
-            return view?.sessionID === sessionID && view.directory
-          })?.activeDirectory || (state.meta?.sessions?.latest?.id === sessionID ? state.meta?.sessions?.latest?.directory : null)
+            return peer.activeSessionID === sessionID && peer.activeDirectory
+          })?.activeDirectory || null
           if (sessionID && directory) {
             for (const peer of state.clients.values()) {
-              const view = peer.view || (peer.activeSessionID && peer.activeDirectory ? { sessionID: peer.activeSessionID, directory: peer.activeDirectory } : null)
-              if (!view) continue
-              if (view.sessionID !== sessionID || view.directory !== directory) continue
+              if (peer.activeSessionID !== sessionID || peer.activeDirectory !== directory) continue
               peer.localSubmitUntil = Date.now() + 8000
               setSyncState(peer, "stale", "peer-submit", peer.lastAction || "noop")
               emitTargetEvent(state.target, "sync-stale", {
@@ -296,8 +324,22 @@ function proxyRequest(ctx, req, res) {
         if (ok && reqUrl.pathname === "/session" && reqUrl.searchParams.get("roots") === "true") {
           rememberWorkspaceSessions(state, dir, parseJsonArray(body), Number(reqUrl.searchParams.get("limit") || "55"), config, now())
         }
-        if (ok && /^\/(global\/config|provider|config|session\/status|project|path)$/.test(reqUrl.pathname)) {
+        if (ok && reqUrl.pathname === "/path" && dir) {
+          body = JSON.stringify({ directory: dir, worktree: dir })
+          delete headers["transfer-encoding"]
+          headers["content-type"] = "application/json; charset=utf-8"
+          headers["content-length"] = Buffer.byteLength(body, "utf8")
+        }
+        if (ok && /^\/(global\/config|provider|config|session\/status|project|path|agent)$/.test(reqUrl.pathname)) {
           state.bootstrap.set(bootstrapKey(reqUrl.pathname, dir), {
+            body,
+            type: String(headers["content-type"] || "application/json"),
+            status,
+            at: now(),
+          })
+        }
+        if (ok && reqUrl.pathname === "/project/current" && dir) {
+          state.projects.set(dir, {
             body,
             type: String(headers["content-type"] || "application/json"),
             status,
@@ -323,35 +365,6 @@ function proxyRequest(ctx, req, res) {
             delete headers["transfer-encoding"]
             headers["content-length"] = Buffer.byteLength(body, "utf8")
             for (const assetPath of extractAssetPaths(body)) warmAsset(state, target, assetPath)
-            if (client.activeDirectory && client.activeSessionID) {
-              const warmBootstrap = (path, keyDir = client.activeDirectory) => enqueueBackground(state, `bootstrap\n${path}\n${keyDir || ''}`, async () => {
-                const query = keyDir ? `${path}?directory=${encodeURIComponent(keyDir)}` : path
-                const data = await fetchJsonWith(target, query, { state }, config)
-                const body = path === '/project' ? rewriteProjectList(state, data.text) : data.text
-                state.bootstrap.set(bootstrapKey(path, keyDir), {
-                  body,
-                  type: String(data.headers?.['content-type'] || 'application/json'),
-                  status: 200,
-                  at: now(),
-                })
-              })
-              warmBootstrap('/global/config', '')
-              warmBootstrap('/path', '')
-              warmBootstrap('/project', '')
-              warmBootstrap('/provider', '')
-              warmBootstrap('/config')
-              warmBootstrap('/provider')
-              warmBootstrap('/session/status')
-              enqueueBackground(state, `project\n${client.activeDirectory}`, async () => {
-                await cacheProjectCurrent(state, target, client.activeDirectory, config)
-              })
-              enqueueBackground(state, `workspace-list\n${client.activeDirectory}`, async () => {
-                await fetchWorkspaceRoot(state, target, client.activeDirectory, config)
-              })
-              enqueueBackground(state, `message\n${client.activeDirectory}\n${client.activeSessionID}\n80`, async () => {
-                await cacheMessages(state, target, client.activeDirectory, client.activeSessionID, 80, config)
-              })
-            }
           }
           headers["x-oc-relay-sync-state"] = client.syncState || (state.offline ? "offline" : "live")
           headers["x-oc-relay-stale-reason"] = client.staleReason || ""
@@ -395,6 +408,12 @@ function proxyRequest(ctx, req, res) {
     if (req.method === "GET" || req.method === "HEAD") {
       upstream.end()
     } else {
+      if (promptRequest && !directory) {
+        upstream.destroy()
+        setLastReason(state, client, "prompt-directory-missing")
+        json(res, 400, { error: "Current workspace/session authority is missing. Refresh the page and try again." }, relayHeaders(priority, "error", "prompt-directory-missing"))
+        return
+      }
       req.on("data", (chunk) => upstream.write(chunk))
       req.on("end", () => upstream.end())
     }

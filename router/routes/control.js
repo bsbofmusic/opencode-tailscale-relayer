@@ -1,12 +1,13 @@
 "use strict"
 
-const { json, withRelay, relayHeaders } = require("../http")
+const { json, withRelay, relayHeaders, runtimeHeaders } = require("../http")
 const { launchPage } = require("../pages")
 const { clientSafeMode, clearLastReason, setLastReason, warmBusy, backgroundWarmPaused, syncAction, syncClientView, targetAdmission, setClientView } = require("../state")
 const { syncWarm, warm, refresh, metaEnvelope } = require("../warm")
 const { classifyError, isMobile, validClient, encodeDir } = require("../util")
 const { targetCookie } = require("../context")
 const { subscribeTarget } = require("../sync/bus")
+const { versionInfo } = require("../version")
 
 function setTargetCookie(res, target) {
   res.setHeader("Set-Cookie", `${targetCookie}=${target.host}:${target.port}; Path=/; Max-Age=2592000; SameSite=Lax`)
@@ -23,7 +24,8 @@ function handoffLocation(target, launch) {
 function progressPayload(state, client) {
   syncWarm(state, client)
   state.admission = targetAdmission(state)
-  const launchReady = Boolean(state.meta?.ready && state.meta?.sessions?.latest?.id && state.meta?.sessions?.latest?.directory)
+  const metaReady = Boolean(state.meta?.ready && state.meta?.sessions?.latest?.id && state.meta?.sessions?.latest?.directory)
+  const launchReady = Boolean(metaReady && state.enterReady && state.enterReadySessionID === state.meta?.sessions?.latest?.id && state.enterReadyDirectory === state.meta?.sessions?.latest?.directory)
   // v0.1.6 Invariant #3: Explicit user context always > latest
   // Priority: client.active* (URL params / explicit intent) > meta.sessions.latest (global fallback)
   // Removed client.view from priority — it's stale during workspace switch, causing jump-back
@@ -33,9 +35,11 @@ function progressPayload(state, client) {
   syncClientView(state, client)
   const refreshing = Boolean(client.warm.active && warmBusy(state))
   const action = syncAction(state, client)
+  const baseSyncState = state.offline ? "offline" : launchReady ? "live" : "idle"
+  const stickySyncState = client.syncState === "offline" && !state.offline ? null : client.syncState
   const syncState = action === "defer" && client.syncState === "stale"
     ? "protected"
-    : client.syncState || (state.offline ? "offline" : launchReady ? "live" : "idle")
+    : (!stickySyncState || (stickySyncState === "idle" && launchReady) ? baseSyncState : stickySyncState)
   if (client.lastAction !== action) {
     client.lastAction = action
     client.lastActionAt = Date.now()
@@ -50,6 +54,8 @@ function progressPayload(state, client) {
     backoffUntil: state.backoffUntil,
     ready: client.warm.ready && Boolean(state.meta?.ready),
     launchReady,
+    enterReady: launchReady,
+    enterReadyReason: state.enterReadyReason,
     refreshing,
     resumeSafeMode: clientSafeMode(client),
     backgroundWarmPaused: backgroundWarmPaused(state),
@@ -83,11 +89,11 @@ function handleEvents(ctx, req, res) {
     json(res, 400, { error: "Invalid target host or port" })
     return
   }
-  res.writeHead(200, {
+  res.writeHead(200, runtimeHeaders({
     "Content-Type": "text/event-stream; charset=utf-8",
     "Cache-Control": "no-store",
-    Connection: "keep-alive",
-  })
+    "X-Accel-Buffering": "no",
+  }))
   res.write(`event: hello\ndata: ${JSON.stringify({ target, offline: state.offline })}\n\n`)
   const unsubscribe = subscribeTarget(target, (message) => {
     res.write(`event: ${message.event}\ndata: ${JSON.stringify(message.payload)}\n\n`)
@@ -127,16 +133,20 @@ function healthPayload(states) {
     const oldestMessageAgeMs = messageEntries.length
       ? Math.max(...messageEntries.map((entry) => entry?.at ? Math.max(0, Date.now() - entry.at) : 0))
       : 0
+    const effectiveStatus = state.meta?.ready && !state.failureReason && !state.lastError
+      ? "ready"
+      : state.targetStatus
     const payload = {
       target: state.target,
       targetType: state.targetType,
-      targetStatus: state.targetStatus,
+      targetStatus: effectiveStatus,
       admission: state.admission,
       availabilityAt: state.availabilityAt,
       failureReason: state.failureReason,
       failureCount: state.failureCount,
       backoffUntil: state.backoffUntil,
-      launchReady: Boolean(state.meta?.ready && state.meta?.sessions?.latest?.id),
+      launchReady: Boolean(state.meta?.ready && state.enterReady && state.enterReadySessionID === state.meta?.sessions?.latest?.id && state.enterReadyDirectory === state.meta?.sessions?.latest?.directory),
+      enterReadyReason: state.enterReadyReason,
       refreshing: warmBusy(state),
       snapshotCount: Math.max(0, ...[...state.clients.values()].map((c) => c.warm.snapshotCount || 0)),
       cachedAt: state.meta?.cache?.cachedAt || 0,
@@ -180,7 +190,54 @@ function healthPayload(states) {
     }
     return payload
   })
-  return { ok: true, targets: summary.length, states: summary }
+  return {
+    ok: true,
+    release: versionInfo,
+    targets: summary.length,
+    states: summary,
+  }
+}
+
+function livezPayload(states) {
+  return {
+    ok: true,
+    release: versionInfo,
+    targets: states.size,
+    now: Date.now(),
+  }
+}
+
+function readyzPayload(states) {
+  const health = healthPayload(states)
+  const notReady = health.states.filter((item) => {
+    if (item.targetStatus === "offline" || item.lastError) return true
+    if (!item.launchReady || item.admission !== "enter") return true
+    if (item.schedulerMode === "overload") return true
+    if (item.promiseActive && item.promiseAgeMs > 10000) return true
+    return false
+  })
+  return {
+    ok: notReady.length === 0,
+    release: versionInfo,
+    targets: health.targets,
+    notReady,
+  }
+}
+
+function modezPayload(states) {
+  return {
+    ok: true,
+    release: versionInfo,
+    targets: [...states.values()].map((state) => ({
+      target: state.target,
+      targetType: state.targetType,
+      targetStatus: state.targetStatus,
+      admission: state.admission,
+      schedulerMode: state.schedulerMode,
+      backgroundWarmPaused: backgroundWarmPaused(state),
+      offline: state.offline,
+    })),
+  }
 }
 
 async function resolveLaunch(state, client, snapshotCount, config) {
@@ -210,6 +267,22 @@ function handleControl(ctx, req, res, states) {
 
   if (ctx.controlRoute === "/healthz") {
     json(res, 200, healthPayload(states), relayHeaders("foreground", "control", "healthz"))
+    return
+  }
+
+  if (ctx.controlRoute === "/livez") {
+    json(res, 200, livezPayload(states), relayHeaders("foreground", "control", "livez"))
+    return
+  }
+
+  if (ctx.controlRoute === "/readyz") {
+    const payload = readyzPayload(states)
+    json(res, payload.ok ? 200 : 503, payload, relayHeaders("foreground", "control", "readyz"))
+    return
+  }
+
+  if (ctx.controlRoute === "/modez") {
+    json(res, 200, modezPayload(states), relayHeaders("foreground", "control", "modez"))
     return
   }
 
@@ -306,6 +379,9 @@ module.exports = {
   clearTargetCookie,
   progressPayload,
   healthPayload,
+  livezPayload,
+  readyzPayload,
+  modezPayload,
   resolveLaunch,
   handleEvents,
 }

@@ -75,6 +75,7 @@ async function tickWatcher(state, config) {
       const nextHead = headFromBody(entry.sessionID, entry.directory, next.text)
       const prevCount = prevHead.messageCount
       const nextCount = nextHead.messageCount
+      const baseline = Boolean(entry.baseline)
       state.messages.set(entryKey, {
         ...entry,
         baseline: false,
@@ -84,13 +85,15 @@ async function tickWatcher(state, config) {
         source: "watcher",
         sourceAt: Date.now(),
       })
-      emitTargetEvent(state.target, "message-appended", {
-        sessionID: entry.sessionID,
-        directory: entry.directory,
-        limit: entry.limit,
-        previousCount: prevCount,
-        nextCount,
-      })
+      if (!baseline) {
+        emitTargetEvent(state.target, "message-appended", {
+          sessionID: entry.sessionID,
+          directory: entry.directory,
+          limit: entry.limit,
+          previousCount: prevCount,
+          nextCount,
+        })
+      }
       
       // v0.1.6.2: Restore per-client head advancement signaling (fixes stale messages + auto refresh)
       // Watcher updates remoteHead/syncState for matching clients, but NEVER touches client.view
@@ -99,6 +102,7 @@ async function tickWatcher(state, config) {
         const clientSession = clientTrackedSession(client)
         if (!clientSession) continue
         if (clientSession.sessionID !== entry.sessionID || clientSession.directory !== entry.directory) continue
+        if (baseline) continue
         if (sameHead(prevHead, nextHead)) continue
         
         // Update remoteHead only, preserve viewHead (don't touch client.view/active*)

@@ -80,6 +80,69 @@ node router/vps-opencode-router.js
 
 ## 升级记录
 
+### v0.2.1（2026-04-17）— 稳定 fallback 版
+
+**这次目标：**
+- 不再继续追求“更聪明”的 relayer，而是先交付一个 **慢一点但稳定** 的版本
+- 优先保证：
+  1. workspace 下的 session 能正确加载
+  2. send / continue 能正确落到当前 workspace/session
+  3. 对话能自动更新，不依赖整页刷新
+
+**这次怎么修：**
+
+1. 收口 authority：
+   - 不再让 `latest-session`、`warm.latestDirectory`、`meta.latest` 参与主工作区判定
+   - 工作区/session authority 只认显式 `directory/sessionID` 和当前 active authority
+2. 停止 relayer 写 upstream 导航持久化：
+   - 不再写：
+     - `opencode.global.dat:server`
+     - `opencode.global.dat:globalSync.project`
+     - `opencode.settings.dat:defaultServerUrl`
+3. prompt/send 改成 fail-closed：
+   - authority 缺失时直接报错
+   - 不再偷偷回 latest / peer / warm
+4. `/path`、`/project/current`、`/agent`、detail fallback 收口到当前 workspace authority
+5. browser/runtime 继续保持保守同步：
+   - 不再做 message80 周期直拉
+   - 发送后依赖 progress + direct reconcile/polling fallback
+6. health 与 ready 更诚实：
+   - 继续暴露 `schedulerMode / backgroundWarmPaused / ptyActive`
+
+**验证结果：**
+- `router-sandbox-check.js`：通过
+- `verify-stress-gate.js`：通过
+- `verify-stable-gates.js`：通过
+- live benchmark：通过
+- live workspace authority 验证：
+  - `D:\CODE` / `E:\CODE` 的 `/path` 与 `/project/current` 一致
+  - `E:\CODE` 新建 session 后可正常 `prompt_async` 并看到消息追加
+
+### v0.1.15（2026-04-17）— 后台自恢复收紧版
+
+**这次修了什么：**
+- 长稳态压测里，后台虽然能恢复，但 `clients` 清理和后台过期任务回收还不够积极
+- `healthz` 的 `targetStatus` 在恢复后仍可能显示旧状态，和真实当前态不一致
+
+**这次怎么修：**
+
+1. 在 `state.js` 的 self-heal 周期中，增加：
+   - 更积极的 stale client 裁剪
+   - 后台过期任务回收
+2. 在 `control.js` 的 `healthz` 输出里：
+   - 如果 `meta.ready` 且没有 `failureReason/lastError`，直接展示 `targetStatus=ready`
+
+**验证结果：**
+- 多轮 browser smoke：通过
+- 多轮 fresh browser / incognito：通过
+- 多轮 workspace switch：通过
+- 长稳态综合压测中：
+  - `failureReason` 持续为空
+  - `lastError` 持续为空
+  - `backgroundQueued` 最终回到 0
+  - `clients` 压测后回落
+  - `targetStatus` 与真实恢复态保持一致
+
 ### v0.1.14（2026-04-17）— 根路径 last-target 恢复
 
 **这次修了什么：**

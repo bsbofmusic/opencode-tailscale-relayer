@@ -10,8 +10,8 @@ const defaults = {
   cleanupIntervalMs: 5 * 60 * 1000,
   idleRecoveryThresholdMs: 300000,
   idleRecoveryWindowMs: 30000,
-  watcherTrackClientMs: 120000,
-  watcherTrackClientMsOverload: 90000,
+  watcherTrackClientMs: 90000,
+  watcherTrackClientMsOverload: 45000,
 }
 
 function emptyHead() {
@@ -53,6 +53,12 @@ function createState(target) {
     details: new Map(),
     projects: new Map(),
     bootstrap: new Map(),
+    enterReady: false,
+    enterReadyAt: 0,
+    enterReadySessionID: null,
+    enterReadyDirectory: null,
+    enterReadyReason: null,
+    enterReadyPromise: undefined,
     assets: new Map(),
     shellHtml: null,
     heavyActive: 0,
@@ -78,6 +84,7 @@ function createState(target) {
       cacheHit: 0,
       cacheMiss: 0,
       cacheBypass: 0,
+      staleCacheServe: 0,
       staleLaunch: 0,
       upstreamFetch: 0,
       heavyQueued: 0,
@@ -92,6 +99,7 @@ function createState(target) {
     lastAccessAt: now(),
     promise: undefined,
     promiseStartedAt: 0,
+    lastRefreshTriggerAt: 0,
   }
 }
 
@@ -213,12 +221,11 @@ function syncClientView(state, client) {
     if (state.offline) setSyncState(client, "offline", "target-offline", client.lastAction || "noop")
     return
   }
-  client.activeSessionID = view.sessionID
-  client.activeDirectory = view.directory
   const remoteHead = messageHead(state, view.directory, view.sessionID, 80)
   const sameView = client.viewHead?.sessionID === view.sessionID && client.viewHead?.directory === view.directory
   const localSubmit = client.localSubmitUntil && client.localSubmitUntil > now()
-  const viewHead = sameView && !localSubmit ? client.viewHead : remoteHead
+  const hasViewBaseline = Boolean(client.viewHead?.updatedAt || client.viewHead?.messageCount || client.viewHead?.tailID)
+  const viewHead = sameView && !localSubmit && hasViewBaseline ? client.viewHead : remoteHead
   setClientHeads(state, client, viewHead, remoteHead)
   if (state.offline) {
     setSyncState(client, "offline", "target-offline", client.lastAction || "noop")
@@ -266,7 +273,7 @@ function schedulerOverloaded(state, config) {
   const soft = Number(cfg.backgroundSoftLimit || 12)
   const heavySoft = Number(cfg.heavyBackgroundSoftLimit || 4)
   const oldPromise = Boolean(state.promiseStartedAt && now() - state.promiseStartedAt >= Number(cfg.promiseAgeSoftLimitMs || 10000))
-  return state.backgroundQueue.length >= soft || state.heavyBackgroundQueue.length >= heavySoft || oldPromise
+  return state.backgroundQueue.length >= soft || state.heavyBackgroundQueue.length >= heavySoft || state.heavyQueue.length >= heavySoft || oldPromise
 }
 
 function setSchedulerMode(state, mode, reason) {
@@ -401,6 +408,21 @@ function cleanupStates(states, force, config) {
 function selfHealState(state, config) {
   const cfg = config || defaults
   const overloadMs = Number(cfg.watchdogOverloadMs || 60000)
+  const pruneTtl = state.schedulerMode === "overload"
+    ? Number(cfg.watchdogClientPruneMsOverload || cfg.watcherTrackClientMsOverload || 45000)
+    : Number(cfg.watchdogClientPruneMs || cfg.watcherTrackClientMs || 90000)
+  pruneStaleClients(state, pruneTtl)
+  const ttl = Number(cfg.backgroundJobTTLMs || 45000)
+  const cutoff = now() - ttl
+  const before = state.backgroundQueue.length
+  state.backgroundQueue = state.backgroundQueue.filter((job) => {
+    const keep = (job.enqueuedAt || 0) >= cutoff
+    if (!keep) state.backgroundKeys.delete(job.key)
+    return keep
+  })
+  if (before > state.backgroundQueue.length) {
+    state.stats.expiredBackgroundJobs += before - state.backgroundQueue.length
+  }
   if (state.schedulerMode !== "overload") return false
   if (!state.overloadSince || now() - state.overloadSince < overloadMs) return false
   const dropped = state.backgroundQueue.length + state.heavyBackgroundQueue.length
@@ -411,6 +433,9 @@ function selfHealState(state, config) {
     state.heavyBackgroundQueue = []
   }
   setSchedulerMode(state, "recovering", "watchdog-drain")
+  if (state.meta?.ready && !state.failureReason && !state.lastError) {
+    state.targetStatus = "ready"
+  }
   return dropped > 0
 }
 
@@ -464,19 +489,18 @@ function rememberActiveSession(client, reqUrl) {
 }
 
 function requestDirectory(client, reqUrl) {
-  return reqUrl.searchParams.get("directory") || client?.activeDirectory || client?.warm?.latestDirectory
+  return reqUrl.searchParams.get("directory") || client?.activeDirectory || ""
 }
 
 function messageBypass(state, client, directory, sessionID, limit) {
   if (limit !== 80) return false
   if (client?.activeSessionID === sessionID && client?.activeDirectory === directory) return true
-  return state.meta?.sessions?.latest?.id === sessionID && state.meta?.sessions?.latest?.directory === directory
+  return false
 }
 
 function messageBypassReason(state, client, directory, sessionID, limit) {
   if (limit !== 80) return null
   if (client?.activeSessionID === sessionID && client?.activeDirectory === directory) return "active-session-bypass"
-  if (state.meta?.sessions?.latest?.id === sessionID && state.meta?.sessions?.latest?.directory === directory) return "latest-session-bypass"
   return null
 }
 

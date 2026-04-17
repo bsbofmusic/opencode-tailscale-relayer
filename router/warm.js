@@ -1,7 +1,7 @@
 "use strict"
 
 const http = require("http")
-const { now, fresh, classifyError, cacheKey, dirKey } = require("./util")
+const { now, fresh, classifyError, cacheKey, dirKey, bootstrapKey } = require("./util")
 const { setWarm, warmBusy, setLastReason, backgroundWarmPaused, clientSafeMode, touchState, targetAdmission, schedulerOverloaded, setSchedulerMode, clearRecoveryState } = require("./state")
 const { runHeavy, enqueueBackground } = require("./heavy")
 const { saveStateCache } = require("./sync/disk-cache")
@@ -19,6 +19,7 @@ const defaults = {
   maxHeavyRequestsPerTarget: 2,
   launchRedirectWaitMs: 1200,
   fastLaunchRedirectWaitMs: 250,
+  refreshThrottleMs: 1500,
 }
 
 let upstreamAgent
@@ -201,6 +202,77 @@ function projectInventory(projects, roots) {
   return list
 }
 
+function markEnterReady(state, session, ready, reason) {
+  state.enterReady = Boolean(ready && session?.id && session?.directory)
+  state.enterReadyAt = now()
+  state.enterReadySessionID = session?.id || null
+  state.enterReadyDirectory = session?.directory || null
+  state.enterReadyReason = reason || null
+}
+
+function enterReadyFor(state, session, ttl) {
+  return Boolean(
+    state.enterReady &&
+    session?.id &&
+    session?.directory &&
+    state.enterReadySessionID === session.id &&
+    state.enterReadyDirectory === session.directory &&
+    fresh(state.enterReadyAt, ttl || 0),
+  )
+}
+
+async function ensureEnterReady(state, target, session, config) {
+  const cfg = config || defaults
+  if (!session?.id || !session?.directory) return false
+  if (enterReadyFor(state, session, cfg.snapshotCacheMs)) return true
+  if (
+    state.enterReadyPromise &&
+    state.enterReadySessionID === session.id &&
+    state.enterReadyDirectory === session.directory
+  ) {
+    return state.enterReadyPromise
+  }
+  markEnterReady(state, session, false, "bootstrap-probe")
+  const run = (async () => {
+    const detailPath = `/session/${encodeURIComponent(session.id)}?directory=${encodeURIComponent(session.directory)}`
+    const agentPath = `/agent?directory=${encodeURIComponent(session.directory)}`
+    const projectPath = `/project/current?directory=${encodeURIComponent(session.directory)}`
+    try {
+      const detail = await fetchJsonWith(target, detailPath, { state }, cfg)
+      state.details.set(`${session.directory}\n${session.id}`, {
+        body: detail.text,
+        type: String(detail.headers?.["content-type"] || "application/json"),
+        status: 200,
+        at: now(),
+      })
+      const project = await fetchJsonWith(target, projectPath, { state }, cfg)
+      state.projects.set(session.directory, {
+        body: project.text,
+        type: String(project.headers?.["content-type"] || "application/json"),
+        status: 200,
+        at: now(),
+      })
+      const agent = await requestText(target, agentPath, { Accept: "application/json", Connection: "close" }, cfg)
+      state.bootstrap.set(bootstrapKey('/agent', session.directory), {
+        body: agent.body,
+        type: String(agent.headers?.["content-type"] || "application/json"),
+        status: 200,
+        at: now(),
+      })
+      markEnterReady(state, session, true, null)
+      saveStateCache(state, cfg)
+      return true
+    } catch (err) {
+      markEnterReady(state, session, false, classifyError(err, "enter-probe-failed"))
+      return false
+    } finally {
+      state.enterReadyPromise = undefined
+    }
+  })()
+  state.enterReadyPromise = run
+  return run
+}
+
 function workspaceSessionEntry(workspaceSessions, directory) {
   return workspaceSessions?.get(dirKey(directory)) || null
 }
@@ -317,6 +389,8 @@ function metaEnvelope(state) {
   }
   return {
     ...base,
+    enterReady: state.enterReady,
+    enterReadyReason: state.enterReadyReason,
     projects: inventory.length ? currentProjects : (base.projects || currentProjects),
     targetType: state.targetType,
     targetStatus: state.targetStatus,
@@ -380,7 +454,8 @@ async function fetchWorkspaceRoot(state, target, directory, config) {
   const cfg = config || defaults
   const limit = Number(cfg.directoryDiscoveryLimit || cfg.maxSessions || defaults.maxSessions)
   const path = `/session?directory=${encodeURIComponent(directory)}&roots=true&limit=${limit}`
-  const data = await fetchJsonWith(target, path, { heavy: true, state }, config)
+  const data = await fetchJsonWith(target, path, { heavy: true, priority: "background", state }, config)
+  if (!data) return []
   const rows = Array.isArray(data.data) ? data.data : []
   rememberWorkspaceSessions(state, directory, rows, limit, config, now())
   return rows
@@ -389,14 +464,15 @@ async function fetchWorkspaceRoot(state, target, directory, config) {
 async function fetchAllWorkspaceRoots(state, target, config) {
   const cfg = config || {}
   const roots = buildWorkspaceRoots(state.inventory, state.sessionList, cfg.extraRoots)
-  await Promise.all(roots.map(async (directory) => {
+  for (const directory of roots) {
+    if (backgroundWarmPaused(state) || schedulerOverloaded(state, cfg)) break
     try {
       await fetchWorkspaceRoot(state, target, directory, config)
     } catch {
       const fallback = state.sessionList.filter((item) => dirKey(resolveWorkspaceRoot(state.inventory, item?.directory)) === dirKey(directory))
       if (fallback.length) rememberWorkspaceSessions(state, directory, fallback, fallback.length, config, now())
     }
-  }))
+  }
   return roots
 }
 
@@ -406,7 +482,8 @@ async function cacheMessages(state, target, directory, sessionID, limit, config)
   const cfg = config || defaults
   const maxHeavy = cfg.maxHeavyRequestsPerTarget || 2
   const maxBg = Math.max(1, maxHeavy - 1)
-  const data = await fetchJsonWith(target, path, { heavy: true, state }, config)
+  const data = await fetchJsonWith(target, path, { heavy: true, priority: "background", state }, config)
+  if (!data) return false
   state.messages.set(cacheKey(directory, sessionID, limit), {
     body: data.text,
     type: "application/json",
@@ -422,7 +499,8 @@ async function cacheMessages(state, target, directory, sessionID, limit, config)
 
 async function cacheDetail(state, target, directory, sessionID, config) {
   const path = `/session/${encodeURIComponent(sessionID)}?directory=${encodeURIComponent(directory)}`
-  const data = await fetchJsonWith(target, path, { heavy: true, state }, config)
+  const data = await fetchJsonWith(target, path, { heavy: true, priority: "background", state }, config)
+  if (!data) return false
   state.details.set(`${directory}\n${sessionID}`, {
     body: data.text,
     type: "application/json",
@@ -433,7 +511,8 @@ async function cacheDetail(state, target, directory, sessionID, config) {
 
 async function cacheProjectCurrent(state, target, directory, config) {
   const path = `/project/current?directory=${encodeURIComponent(directory)}`
-  const data = await fetchJsonWith(target, path, { state }, config)
+  const data = await fetchJsonWith(target, path, { heavy: true, priority: "background", state }, config)
+  if (!data) return false
   state.projects.set(directory, {
     body: data.text,
     type: "application/json",
@@ -526,10 +605,22 @@ function syncClients(state) {
 function scheduleSnapshotWarm(state, client, target, latestSession, nearby, config) {
   const cfg = config || defaults
   if (!latestSession?.directory || !latestSession?.id) return
+  if (backgroundWarmPaused(state) || schedulerOverloaded(state, cfg)) {
+    setWarm(client, {
+      active: false,
+      ready: true,
+      percent: 100,
+      stage: "ready",
+      note: "Background prefetch is paused while interactive work stays prioritized.",
+      cachedAt: now(),
+      snapshotCount: 1,
+    })
+    return
+  }
   const detailKey = `${latestSession.directory}\n${latestSession.id}`
   const needsDetail = !fresh(state.details.get(detailKey)?.at, cfg.snapshotCacheMs)
-  const messageJobs = nearby
-    .map((item) => ({ item, limit: item.id === latestSession.id ? 80 : 200 }))
+  const messageJobs = [latestSession]
+    .map((item) => ({ item, limit: 80 }))
     .filter(({ item, limit }) => !fresh(state.messages.get(cacheKey(item.directory, item.id, limit))?.at, cfg.snapshotCacheMs))
   const jobs = []
   if (!fresh(state.shellHtml?.at, cfg.snapshotCacheMs)) {
@@ -685,11 +776,10 @@ async function warm(state, client, force, options, config) {
     // FAST-PATH: build meta from DISCOVERY list only — do NOT wait for fetchAllWorkspaceRoots.
     // compute latest from discoveryList using session time order (newest first)
     const discoveryIndex = sortSessions(discoveryList)
-    const latestFromDiscovery = discoveryIndex[0] || null
-    const fastMetaReady = Boolean(health?.healthy === true && latestFromDiscovery?.id && latestFromDiscovery?.directory)
     const fastInventory = (Array.isArray(inventory) ? inventory : []).filter(item => item && !String(item.id || "").startsWith("relay:"))
     const fastRoots = buildWorkspaceRoots(fastInventory, discoveryList, cfg.extraRoots)
     const fastMeta = buildMeta(target, health.data, discoveryList, fastInventory, new Map(), health.latencyMs, cfg)
+    const fastMetaReady = Boolean(fastMeta?.ready && fastMeta?.sessions?.latest?.id && fastMeta?.sessions?.latest?.directory)
     state.meta = fastMeta
     state.metaAt = now()
     state.targetStatus = fastMetaReady ? "ready" : "no-session"
@@ -706,6 +796,7 @@ async function warm(state, client, force, options, config) {
     setSchedulerMode(state, overload ? "overload" : (state.schedulerMode === "overload" ? "recovering" : state.schedulerMode), overload ? "warm-backlog" : null)
     if (fastMetaReady) {
       const latestSession = fastMeta.sessions.latest
+      await ensureEnterReady(state, target, latestSession, cfg)
       const nearby = discoveryList
         .filter((item) => item?.directory === latestSession?.directory)
         .slice(0, health.latencyMs >= cfg.slowHealthLatencyMs ? 0 : requestedSnapshotCount)
@@ -776,8 +867,10 @@ function refresh(state, client, config) {
   if (state.promise) return
   if (!state.meta) return
   if (fresh(state.metaAt, cfg.metaCacheMs)) return
+  if (state.lastRefreshTriggerAt && now() - state.lastRefreshTriggerAt < Number(cfg.refreshThrottleMs || defaults.refreshThrottleMs)) return
   const { ensureClientState, sharedClientID } = require("./state")
   const launch = client || ensureClientState(state, sharedClientID)
+  state.lastRefreshTriggerAt = now()
   void warm(state, launch, true, { snapshotCount: snapshotGoal(state, launch.warm.snapshotCount || cfg.desktopWarmSessionCount) }, config).catch(() => {})
 }
 

@@ -53,6 +53,20 @@ function decodeDir(value) {
   }
 }
 
+function pathSessionView(pathname) {
+  try {
+    const parts = String(pathname || "").split("/")
+    if (parts[2] !== "session") return null
+    const dirToken = parts[1] || ""
+    const sessionID = decodeURIComponent(parts[3] || "")
+    const directory = decodeDir(dirToken)
+    if (!dirToken || !sessionID || !directory) return null
+    return { directory, sessionID, pathname: String(pathname || "") }
+  } catch {
+    return null
+  }
+}
+
 function parseTarget(host, port) {
   if (!host) return
   if (!validIp(host)) return
@@ -157,6 +171,7 @@ module.exports = {
   parseCookies,
   encodeDir,
   decodeDir,
+  pathSessionView,
   parseTarget,
   keyFor,
   targetType,

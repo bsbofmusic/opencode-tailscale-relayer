@@ -1,6 +1,6 @@
 "use strict"
 
-const { parseCookies, validClient, validIp, validPort, parseTarget, isSessionHtmlPath, isHeavyRequest, messageRequestInfo, createClientID } = require("./util")
+const { parseCookies, validClient, validIp, validPort, parseTarget, isSessionHtmlPath, isHeavyRequest, messageRequestInfo, createClientID, pathSessionView } = require("./util")
 const { ensureState, ensureClientState, clientSafeMode, requestDirectory, messageBypass, relayPriority, backgroundWarmPaused } = require("./state")
 const { fresh } = require("./util")
 
@@ -92,8 +92,10 @@ function buildContext(req, reqUrl, states, config) {
   const allowGenerated = pathname === "/__oc/launch"
   const ref = refererUrl(req.headers)
   const refererClient = ref?.searchParams.get("client") || ""
+  const refererView = pathSessionView(ref?.pathname || "")
   ctx.client = ensureClientState(ctx.state, getClientID(reqUrl, { allowGenerated, refererClient }), cfg)
   ctx.resumeSafe = clientSafeMode(ctx.client)
+  ctx.refererView = refererView
 
   if (!isControl && !isUpgrade && req.method === "GET") {
     ctx.isSessionHtml = isSessionHtmlPath(pathname)

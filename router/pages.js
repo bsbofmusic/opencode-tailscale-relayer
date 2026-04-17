@@ -240,11 +240,14 @@ function landingPage(target) {
       port.value = cleanPort(String(saved.port || '3000'))
     }
     const seeded = host.value.trim()
-    if (search.get('host') || seeded) {
+    const explicitTarget = Boolean(search.get('host'))
+    if (explicitTarget || seeded) {
       if (search.get('autogo') === '0') {
         inspect().catch(function (error) { status.textContent = error.message || String(error) })
-      } else {
+      } else if (explicitTarget) {
         openLatest()
+      } else {
+        status.textContent = 'Restored the last target. Click Open Remote OpenCode or Check when you are ready.'
       }
     }
   </script>
@@ -357,74 +360,12 @@ function launchPage(target, clientID, initial) {
       if (!cachedLaunch) return
       location.replace(nextUrl(cachedLaunch))
     })
-    function serverKeys() {
-      const keys = [origin]
-      if (location.hostname === '127.0.0.1' || location.hostname === 'localhost') keys.unshift('local')
-      return Array.from(new Set(keys))
-    }
-    function normalizeInventory(meta) {
-      const inventory = (meta && meta.projects && Array.isArray(meta.projects.inventory)) ? meta.projects.inventory : []
-      return inventory.filter(function (item) {
-        return item && typeof item === 'object' && item.worktree && item.worktree !== '/' && !(item.worktree.length === 1 && item.worktree.charCodeAt(0) === 92)
-      })
-    }
-    function mergeServerProjects(meta) {
-      const inventory = normalizeInventory(meta)
-      if (!inventory.length) return
-      const roots = (meta && meta.projects && Array.isArray(meta.projects.roots)) ? meta.projects.roots : []
-      const lastProjectSession = (meta && meta.projects && meta.projects.lastProjectSession) ? meta.projects.lastProjectSession : {}
-      const server = read(serverKey)
-      const projects = { ...(server.projects || {}) }
-      const lastProject = { ...(server.lastProject || {}) }
-      serverKeys().forEach(function (key) {
-        const prev = Array.isArray(projects[key]) ? projects[key] : []
-        const byWorktree = new Map(prev.filter(function (item) { return item && item.worktree }).map(function (item) { return [item.worktree, item] }))
-        inventory.forEach(function (item) {
-          const merged = { ...(byWorktree.get(item.worktree) || {}), ...item }
-          byWorktree.set(item.worktree, merged)
-        })
-        roots.forEach(function (root) {
-          if (root === '/' || (root.length === 1 && root.charCodeAt(0) === 92)) return
-          if (!root || byWorktree.has(root)) return
-          byWorktree.set(root, { id: 'relay:' + encodeDir(root), worktree: root, sandboxes: [] })
-        })
-        projects[key] = Array.from(byWorktree.values())
-        if (!lastProject[key] && inventory[0]) {
-          lastProject[key] = inventory[0].worktree
-        }
-      })
-      Object.keys(lastProjectSession || {}).forEach(function (worktree) {
-        const session = lastProjectSession[worktree]
-        if (!session || !session.directory) return
-        serverKeys().forEach(function (key) {
-          if (!lastProject[key] || lastProject[key] === worktree) lastProject[key] = session.directory
-        })
-      })
-      write(serverKey, { ...server, projects, lastProject })
-    }
-    function mergeGlobalProject(meta) {
-      const inventory = normalizeInventory(meta)
-      if (!inventory.length) return
-      const current = read(globalProjectKey)
-      if (current && current.id) return
-      const preferred = inventory.find(function (item) { return item.worktree === meta?.sessions?.latest?.directory }) || inventory[0]
-      if (!preferred) return
-      write(globalProjectKey, { ...current, id: preferred.id, worktree: preferred.worktree })
-    }
-    function seedDefaultServer() {
-      const current = localStorage.getItem(defaultServerKey)
-      if (current) return
-      localStorage.setItem(defaultServerKey, origin)
-    }
     function seed(meta) {
       const workspaceRoots = ((meta.projects && meta.projects.roots) || []).filter(function (root) {
         return root !== '/' && !(root && root.length === 1 && root.charCodeAt(0) === 92)
       })
       sessionStorage.setItem(clientKey, target.client)
       sessionStorage.setItem(snapshotKey, JSON.stringify({ cachedAt: Date.now(), source: 'vps', target: target, workspaceRoots }))
-      mergeServerProjects(meta)
-      mergeGlobalProject(meta)
-      seedDefaultServer()
     }
     function label(value) {
       const map = {
@@ -490,7 +431,7 @@ function launchPage(target, clientID, initial) {
         const metaResult = await fetchJson('/__oc/meta?host=' + encodeURIComponent(target.host) + '&port=' + encodeURIComponent(target.port) + '&client=' + encodeURIComponent(target.client), 4000)
         const metaRes = metaResult.res
         const meta = metaResult.data
-        if (metaRes.ok && meta && meta.ready && meta.sessions && meta.sessions.latest) {
+        if (metaRes.ok && meta && meta.ready && meta.enterReady && meta.sessions && meta.sessions.latest) {
           seed(meta)
           go({ directory: encodeDir(meta.sessions.latest.directory), sessionID: meta.sessions.latest.id })
           return true
@@ -602,20 +543,6 @@ function sessionSyncRuntime() {
       if (!view?.key) return
       sessionStorage.setItem(view.key, JSON.stringify({ action, at: Date.now() }))
     }
-    const head = () => {
-      try {
-        const view = currentView()
-        if (!view?.msgKey) return null
-        return JSON.parse(sessionStorage.getItem(view.msgKey) || 'null')
-      } catch {
-        return null
-      }
-    }
-    const setHead = (value) => {
-      const view = currentView()
-      if (!view?.msgKey) return
-      sessionStorage.setItem(view.msgKey, JSON.stringify(value))
-    }
     const fetchJson = async (path) => {
       const res = await fetch(withBase(path), { credentials: 'same-origin', cache: 'no-store' })
       return await res.json()
@@ -624,28 +551,6 @@ function sessionSyncRuntime() {
       const view = currentView()
       if (!view?.directory || !view?.sessionID) return path
       return path + (path.includes('?') ? '&' : '?') + 'directory=' + encodeURIComponent(view.directory) + '&sessionID=' + encodeURIComponent(view.sessionID)
-    }
-    const checkHead = async () => {
-      const view = currentView()
-      if (!view?.directory || !view?.sessionID) return
-      const routeAtStart = view.route
-      const res = await fetch(withBase('/session/' + encodeURIComponent(view.sessionID) + '/message?limit=80&directory=' + encodeURIComponent(view.directory)), { credentials: 'same-origin', cache: 'no-store' })
-      if (!res.ok) return
-      const rows = await res.json()
-      if ((currentView()?.route || '') !== routeAtStart) return
-      if (!Array.isArray(rows)) return
-      const tail = rows.length ? rows[rows.length - 1] : null
-      const next = { count: rows.length, tailID: tail?.info?.id || tail?.id || null }
-      const prev = head()
-      setHead(next)
-      if (!prev) return
-      if (Date.now() - startedAt < 10000) return
-      if (prev.count === next.count && prev.tailID === next.tailID) return
-      if (window.__ocTailnetSync?.state === 'protected' || window.__ocTailnetSync?.lastAction === 'defer') return
-      if (recent('soft-refresh') || recent('re-enter')) return
-      if ((currentView()?.route || '') !== routeAtStart) return
-      mark('soft-refresh')
-      location.replace(location.pathname + location.search)
     }
     const apply = async () => {
       const view = currentView()
@@ -667,34 +572,17 @@ function sessionSyncRuntime() {
         location.replace(nextUrl(data.launch))
       }
     }
-    let lastHeadCheck = 0
-    let lastHeadRoute = ''
-    const pulse = async (withHead = false) => {
-      const route = currentView()?.route || ''
-      if (route !== lastHeadRoute) {
-        lastHeadRoute = route
-        lastHeadCheck = 0
-      }
+    const pulse = async () => {
       await apply()
-      if (!withHead) return
-      const nowTs = Date.now()
-      if (nowTs - lastHeadCheck < 12000) return
-      lastHeadCheck = nowTs
-      await checkHead()
     }
      const onRouteChange = (previousView) => {
       const nextView = currentView()
-      const route = nextView?.route || ''
-      if (route !== lastHeadRoute) {
-        lastHeadRoute = route
-        lastHeadCheck = 0
-      }
       const changedSession = Boolean(
         previousView &&
         nextView &&
         (previousView.sessionID !== nextView.sessionID || previousView.directory !== nextView.directory)
       )
-      if (changedSession) void pulse(true)
+      if (changedSession) void pulse()
      }
      const originalPushState = history.pushState
      history.pushState = function () {
@@ -712,15 +600,15 @@ function sessionSyncRuntime() {
      }
      window.__ocTailnetSync = { mode: 'active', state: 'live', lastAction: 'noop', staleReason: null }
      const stream = new EventSource('/__oc/events' + base)
-     stream.addEventListener('sync-stale', () => void pulse(true))
-     stream.addEventListener('message-appended', () => void pulse(true))
-     stream.addEventListener('target-health-changed', () => void pulse(false))
-     stream.onerror = () => void pulse(true)
-     document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') void pulse(true) })
-     window.addEventListener('focus', () => void pulse(true))
+     stream.addEventListener('sync-stale', () => void pulse())
+     stream.addEventListener('message-appended', () => void pulse())
+     stream.addEventListener('target-health-changed', () => void pulse())
+     stream.onerror = () => void pulse()
+     document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') void pulse() })
+     window.addEventListener('focus', () => void pulse())
      window.addEventListener('popstate', () => onRouteChange(null))
-     setInterval(() => void pulse(true), 15000)
-     void pulse(true)
+     setInterval(() => void pulse(), 15000)
+     void pulse()
      window.__ocTailnetSyncUI = {
        shouldShow: () => {
          const state = window.__ocTailnetSync?.state || 'live'

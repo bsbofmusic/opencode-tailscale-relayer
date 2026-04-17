@@ -1,6 +1,6 @@
 "use strict"
 
-const { raw, relayHeaders } = require("../http")
+const { raw, relayHeaders, runtimeHeaders } = require("../http")
 const { touchState, touchClient, clearLastReason, requestDirectory, messageBypass, relayPriority } = require("../state")
 const { syncWarm, refresh, workspaceListForLimit, buildWorkspaceRoots, projectInventory } = require("../warm")
 const { fresh, cacheKey, bootstrapKey } = require("../util")
@@ -16,6 +16,10 @@ function currentProject(state, directory) {
     id: `relay:${Buffer.from(String(directory), "utf8").toString("base64").replace(/=+$/g, "")}`,
     worktree: directory,
     sandboxes: [],
+    time: {
+      created: Date.now(),
+      updated: Date.now(),
+    },
   }
 }
 
@@ -42,6 +46,15 @@ function rewriteProjectBody(state, body) {
   return JSON.stringify(projectInventory(source, roots))
 }
 
+function rewritePathBody(directory, body) {
+  try {
+    const parsed = JSON.parse(String(body || "{}"))
+    return JSON.stringify({ ...parsed, directory, worktree: directory })
+  } catch {
+    return JSON.stringify({ directory, worktree: directory })
+  }
+}
+
 function maybeServeCached(ctx, req, res) {
   if (req.method !== "GET") return false
   const { state, client, reqUrl, config } = ctx
@@ -57,10 +70,16 @@ function maybeServeCached(ctx, req, res) {
     latestSessionID: state.meta?.sessions?.latest?.id || "",
     latestDirectory: state.meta?.sessions?.latest?.directory || "",
   })
-  const cacheHeaders = (priority) => ({
-    ...relayHeaders(priority, "cache", "cache-hit", "hit"),
+  const cacheHeaders = (priority, reason = "cache-hit", cache = "hit") => ({
+    ...relayHeaders(priority, "cache", reason, cache),
     ...(state.offline ? { "X-OC-Offline": "true" } : {}),
   })
+  const serveStale = (hit, body, type) => {
+    state.stats.staleCacheServe += 1
+    clearLastReason(state, client)
+    raw(res, hit.status || 200, body ?? hit.body, type || hit.type, cacheHeaders(priority, "cache-stale", "stale"))
+    return true
+  }
 
   syncWarm(state, client)
   touchState(state)
@@ -68,6 +87,7 @@ function maybeServeCached(ctx, req, res) {
   const directory = requestDirectory(client, reqUrl)
   const priority = relayPriority(reqUrl, client)
   const assetCacheMs = config.assetCacheMs || 24 * 60 * 60 * 1000
+  const directoryScopedBootstrap = new Set(["/path", "/agent"])
   if (/^\/(assets\/|favicon|site\.webmanifest)/.test(reqUrl.pathname)) {
     const hit = state.assets?.get(reqUrl.pathname)
     if (!hit || !hit.headers || !hit.headers['content-type']) {
@@ -79,17 +99,17 @@ function maybeServeCached(ctx, req, res) {
       return false
     }
     state.stats.cacheHit += 1
-    res.writeHead(hit.status || 200, {
+    res.writeHead(hit.status || 200, runtimeHeaders({
       ...(hit.headers || {}),
       ...relayHeaders(priority, 'cache', 'cache-hit', 'hit'),
       ...(state.offline ? { 'X-OC-Offline': 'true' } : {}),
-    })
+    }))
     res.end(hit.body)
     return true
   }
 
-  if (/^\/(global\/config|provider|config|session\/status|project|path)$/.test(reqUrl.pathname)) {
-    const hit = state.bootstrap?.get(bootstrapKey(reqUrl.pathname, directory)) || state.bootstrap?.get(bootstrapKey(reqUrl.pathname, ""))
+  if (/^\/(global\/config|provider|config|session\/status|project|path|agent)$/.test(reqUrl.pathname)) {
+    const hit = state.bootstrap?.get(bootstrapKey(reqUrl.pathname, directory)) || (!directoryScopedBootstrap.has(reqUrl.pathname) ? state.bootstrap?.get(bootstrapKey(reqUrl.pathname, "")) : null)
     if (!hit) {
       state.stats.cacheMiss += 1
       return false
@@ -97,11 +117,20 @@ function maybeServeCached(ctx, req, res) {
     if (!fresh(hit.at, snapshotCacheMs)) {
       state.stats.cacheMiss += 1
       refresh(state, client, config)
-      return false
+      const body = reqUrl.pathname === "/project"
+        ? rewriteProjectBody(state, hit.body)
+        : reqUrl.pathname === "/path" && directory
+          ? rewritePathBody(directory, hit.body)
+          : hit.body
+      return serveStale(hit, body, hit.type)
     }
     state.stats.cacheHit += 1
     clearLastReason(state, client)
-    const body = reqUrl.pathname === "/project" ? rewriteProjectBody(state, hit.body) : hit.body
+    const body = reqUrl.pathname === "/project"
+      ? rewriteProjectBody(state, hit.body)
+      : reqUrl.pathname === "/path" && directory
+        ? rewritePathBody(directory, hit.body)
+        : hit.body
     raw(res, hit.status || 200, body, hit.type, cacheHeaders(priority))
     return true
   }
@@ -122,7 +151,7 @@ function maybeServeCached(ctx, req, res) {
     if (!fresh(hit.at, snapshotCacheMs)) {
       state.stats.cacheMiss += 1
       refresh(state, client, config)
-      return false
+      return serveStale(hit)
     }
     state.stats.cacheHit += 1
     clearLastReason(state, client)
@@ -140,7 +169,7 @@ function maybeServeCached(ctx, req, res) {
     if (!fresh(hit.at, snapshotCacheMs)) {
       state.stats.cacheMiss += 1
       refresh(state, client, config)
-      return false
+      return serveStale(hit)
     }
     state.stats.cacheHit += 1
     clearLastReason(state, client)
@@ -171,7 +200,7 @@ function maybeServeCached(ctx, req, res) {
     if (!fresh(hit.at, snapshotCacheMs)) {
       state.stats.cacheMiss += 1
       refresh(state, client, config)
-      return false
+      return serveStale(hit)
     }
     state.stats.cacheHit += 1
     clearLastReason(state, client)
@@ -202,7 +231,7 @@ function maybeServeCached(ctx, req, res) {
     if (!fresh(hit.at, snapshotCacheMs)) {
       state.stats.cacheMiss += 1
       refresh(state, client, config)
-      return false
+      return serveStale(hit)
     }
     state.stats.cacheHit += 1
     clearLastReason(state, client)

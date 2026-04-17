@@ -6,6 +6,7 @@ const { dispatch } = require("./dispatch")
 const { ensureState, cleanupStates } = require("./state")
 const { proxyUpgrade } = require("./routes/websocket")
 const { getTarget } = require("./context")
+const { versionInfo } = require("./version")
 
 function envFlag(name, fallback) {
   const value = process.env[name]
@@ -62,8 +63,12 @@ function createRouter(options) {
       .split(",")
       .map((item) => item.trim())
       .filter(Boolean),
-    enableProgressQueryOverride: envFlag("OPENCODE_ROUTER_ENABLE_PROGRESS_QUERY_OVERRIDE", false),
+    enableProgressQueryOverride: envFlag("OPENCODE_ROUTER_ENABLE_PROGRESS_QUERY_OVERRIDE", true),
     healthzDebug: envFlag("OPENCODE_ROUTER_HEALTHZ_DEBUG", false),
+    releaseId: process.env.OPENCODE_ROUTER_RELEASE_ID || versionInfo.releaseId,
+    contractVersion: process.env.OPENCODE_ROUTER_CONTRACT_VERSION || versionInfo.contractVersion,
+    manifestHash: process.env.OPENCODE_ROUTER_MANIFEST_HASH || versionInfo.manifestHash,
+    cacheSchema: process.env.OPENCODE_ROUTER_CACHE_SCHEMA || versionInfo.cacheSchema,
     ...opts.config,
   }
 

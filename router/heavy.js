@@ -28,6 +28,9 @@ function drainHeavy(state, maxHeavy, maxBackgroundHeavy) {
 
 function runHeavy(state, work, priority, maxHeavy, maxBackgroundHeavy) {
   const mode = priority === "background" ? "background" : "foreground"
+  if (mode === "background" && (backgroundWarmPaused(state) || schedulerOverloaded(state, state.config))) {
+    return Promise.resolve(null)
+  }
   const start = (resolve, reject) => {
     state.heavyActive += 1
     if (mode === "background") state.heavyBackgroundActive += 1

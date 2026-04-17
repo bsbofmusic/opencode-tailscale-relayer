@@ -1,10 +1,10 @@
 "use strict"
 
-const { text } = require("../http")
+const { text, runtimeHeaders } = require("../http")
 
 function serveStatic(ctx, res) {
   if (ctx.pathname === "/favicon.ico") {
-    res.writeHead(204, { "Cache-Control": "public, max-age=86400" })
+    res.writeHead(204, runtimeHeaders({ "Cache-Control": "public, max-age=86400" }))
     res.end()
     return
   }
