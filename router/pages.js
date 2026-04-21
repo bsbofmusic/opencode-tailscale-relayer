@@ -519,13 +519,7 @@ function compatBootstrapRuntime(targetExpr, metaExpr) {
       })
     }
     function compatProjectEntry(root, inventoryItem) {
-      if (inventoryItem) return { ...inventoryItem }
-      return {
-        id: 'relay:' + btoa(unescape(encodeURIComponent(String(root || '')))).replace(/=+$/g, ''),
-        worktree: root,
-        sandboxes: [],
-        time: { created: Date.now(), updated: Date.now() },
-      }
+      return inventoryItem ? { ...inventoryItem } : null
     }
     function compatSeed(meta) {
       const compatTarget = ${targetExpr}
@@ -538,7 +532,7 @@ function compatBootstrapRuntime(targetExpr, metaExpr) {
       const projects = { ...(server.projects || {}) }
       projects[currentKey] = roots.map(function (root) {
         return compatProjectEntry(root, inventoryByRoot.get(String(root).toLowerCase()))
-      })
+      }).filter(Boolean)
       compatWrite(serverKey, { ...server, projects })
       const globalSync = compatRead(globalProjectKey, {}) || {}
       compatWrite(globalProjectKey, { ...globalSync, value: inventory.filter(function (item) { return roots.includes(item.worktree) }) })
@@ -780,8 +774,14 @@ function sessionSyncRuntime(bootstrap) {
       window.__ocTailnetSync = { mode: 'missing-target' }
       return
     }
-    const startedAt = Date.now()
+    const minGap = 5000
     const bootstrap = ${bootstrapPayload}
+    const normalizeMode = (value) => {
+      const text = String(value || '').toLowerCase()
+      if (text === 'off' || text === 'experimental') return text
+      return 'safe'
+    }
+    const accelMode = normalizeMode(bootstrap?.accelMode || 'safe')
     const base = '?host=' + encodeURIComponent(host) + '&port=' + encodeURIComponent(port) + '&client=' + encodeURIComponent(client)
     const withBase = (path) => path + (path.includes('?') ? '&' : '?') + 'host=' + encodeURIComponent(host) + '&port=' + encodeURIComponent(port) + '&client=' + encodeURIComponent(client)
     ${compatBootstrapRuntime("bootstrap?.target || { host, port }", "bootstrap?.meta || null")}
@@ -803,7 +803,8 @@ function sessionSyncRuntime(bootstrap) {
         const routeSessionID = decodeURIComponent(parts[3] || '')
         const directory = decodeDir(dirToken)
         if (!dirToken || !routeSessionID || !directory) return null
-        const keyBase = 'oc-tailnet-sync:' + encodeURIComponent(dirToken || 'global') + ':' + encodeURIComponent(routeSessionID || 'none')
+        const targetKey = encodeURIComponent(host + ':' + port)
+        const keyBase = 'oc-tailnet-sync:' + targetKey + ':' + encodeURIComponent(dirToken || 'global') + ':' + encodeURIComponent(routeSessionID || 'none')
         return {
           dirToken,
           sessionID: routeSessionID,
@@ -817,7 +818,29 @@ function sessionSyncRuntime(bootstrap) {
         return null
       }
     }
-    const ready = () => document.visibilityState === 'visible' && document.hasFocus()
+    const ready = () => document.visibilityState === 'visible'
+    const parseEventPayload = (event) => {
+      try {
+        return JSON.parse(event?.data || '{}')
+      } catch {
+        return {}
+      }
+    }
+    const recent = (action) => {
+      try {
+        const view = currentView()
+        if (!view?.key) return false
+        const last = JSON.parse(sessionStorage.getItem(view.key) || '{}')
+        return last.action === action && Date.now() - Number(last.at || 0) < minGap
+      } catch {
+        return false
+      }
+    }
+    const mark = (action) => {
+      const view = currentView()
+      if (!view?.key) return
+      sessionStorage.setItem(view.key, JSON.stringify({ action, at: Date.now() }))
+    }
     const fetchJson = async (path) => {
       const res = await fetch(withBase(path), { credentials: 'same-origin', cache: 'no-store' })
       return await res.json()
@@ -836,13 +859,29 @@ function sessionSyncRuntime(bootstrap) {
         ${compatBootstrapRuntime("{ host, port }", "data.meta")}
       }
       if ((currentView()?.route || '') !== routeAtStart) return
+      window.__ocTailnetSync.mode = normalizeMode(data.accelMode || window.__ocTailnetSync.mode || accelMode)
       window.__ocTailnetSync.state = data.syncState || 'live'
       window.__ocTailnetSync.lastAction = data.lastAction || 'noop'
       window.__ocTailnetSync.staleReason = data.staleReason || null
+      const safeRefresh = window.__ocTailnetSync.mode !== 'off'
+        && data.syncState === 'stale'
+        && data.lastAction === 'soft-refresh'
+        && (data.staleReason === 'head-advanced' || data.staleReason === 'peer-submit')
+      if (safeRefresh && ready() && !recent('soft-refresh')) {
+        mark('soft-refresh')
+        location.replace(routeAtStart)
+        return
+      }
       if (!ready()) return
     }
     const pulse = async () => {
       await apply()
+    }
+    const eventMatchesCurrent = (payload) => {
+      const view = currentView()
+      if (!view?.sessionID || !view?.directory) return false
+      if ((window.__ocTailnetSync?.mode || accelMode) === 'experimental') return true
+      return payload?.sessionID === view.sessionID && payload?.directory === view.directory
     }
      const onRouteChange = (previousView) => {
       const nextView = currentView()
@@ -867,17 +906,37 @@ function sessionSyncRuntime(bootstrap) {
       onRouteChange(previousView)
       return result
      }
-     window.__ocTailnetSync = { mode: 'active', state: 'live', lastAction: 'noop', staleReason: null }
+     window.__ocTailnetSync = { mode: accelMode, state: 'live', lastAction: 'noop', staleReason: null }
      const stream = new EventSource('/__oc/events' + base)
-     stream.addEventListener('sync-stale', () => void pulse())
-     stream.addEventListener('message-appended', () => void pulse())
-     stream.addEventListener('target-health-changed', () => void pulse())
-     stream.onerror = () => void pulse()
-     document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') void pulse() })
-     window.addEventListener('focus', () => void pulse())
+     stream.addEventListener('sync-stale', (event) => {
+      if ((window.__ocTailnetSync?.mode || accelMode) === 'off') return
+      if (eventMatchesCurrent(parseEventPayload(event))) void pulse()
+     })
+     stream.addEventListener('message-appended', (event) => {
+      if ((window.__ocTailnetSync?.mode || accelMode) === 'off') return
+      if (eventMatchesCurrent(parseEventPayload(event))) void pulse()
+     })
+     stream.addEventListener('target-health-changed', () => {
+      if ((window.__ocTailnetSync?.mode || accelMode) === 'off') return
+      void pulse()
+     })
+     stream.onerror = () => {
+      if ((window.__ocTailnetSync?.mode || accelMode) === 'off') return
+      void pulse()
+     }
+     document.addEventListener('visibilitychange', () => {
+      if ((window.__ocTailnetSync?.mode || accelMode) === 'off') return
+      if (document.visibilityState === 'visible') void pulse()
+     })
+     window.addEventListener('focus', () => {
+      if ((window.__ocTailnetSync?.mode || accelMode) === 'off') return
+      void pulse()
+     })
      window.addEventListener('popstate', () => onRouteChange(null))
-     setInterval(() => void pulse(), 15000)
-     void pulse()
+     if ((window.__ocTailnetSync?.mode || accelMode) !== 'off') {
+      setInterval(() => void pulse(), 15000)
+      void pulse()
+     }
      window.__ocTailnetSyncUI = {
        shouldShow: () => {
          const state = window.__ocTailnetSync?.state || 'live'

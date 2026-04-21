@@ -342,7 +342,7 @@ function buildMeta(target, health, list, projects, workspaceSessions, latencyMs,
   const raw = Array.isArray(projects) ? projects : []
   const realInventory = raw.filter((item) => item && !String(item.id || "").startsWith("relay:"))
   const roots = buildWorkspaceRoots(realInventory, list, cfg.extraRoots)
-  const inventory = projectInventory(realInventory, roots)
+  const inventory = realInventory.slice()
   const sessionIndex = buildSessionIndex(roots, realInventory, workspaceSessions, list, cfg.maxSessions)
   const root = sessionIndex[0] || null
   return {
@@ -407,7 +407,7 @@ function metaEnvelope(state) {
   const realInventory = raw.filter((item) => item && !String(item.id || "").startsWith("relay:"))
   const built = buildWorkspaceRoots(realInventory, state.sessionList, state.config?.extraRoots)
   const roots = built.length ? built : fallbackRoots
-  const inventory = projectInventory(realInventory, roots)
+  const inventory = realInventory.slice()
   const currentProjects = {
     count: inventory.length,
     roots,
@@ -794,7 +794,7 @@ async function warm(state, client, force, options, config) {
       inventory = []
     }
     const discoveryList = Array.isArray(sessions.data) ? sessions.data : []
-    inventory = projectInventory(inventory, buildWorkspaceRoots(inventory, discoveryList, cfg.extraRoots))
+    inventory = Array.isArray(inventory) ? inventory.filter((item) => item && !String(item.id || "").startsWith("relay:")) : []
     state.inventory = inventory
     state.inventoryAt = now()
     state.config = cfg
@@ -847,13 +847,34 @@ async function warm(state, client, force, options, config) {
     saveStateCache(state, config)
 
     // BACKGROUND: fill workspaceSessions for all roots — does NOT block the fast return
-    if (!overload) void fetchAllWorkspaceRoots(state, target, cfg).then(() => {
-      // after background workspace roots load, rebuild sessionIndex and meta with full workspaceSessions
-      if (!state.meta?.ready) return
+    if (!overload) void fetchAllWorkspaceRoots(state, target, cfg).then(async () => {
+      // after background workspace roots load, rebuild sessionIndex/meta even when fast-path first returned no-session.
+      // This lets explicit extraRoots and per-workspace discovery promote a real latest session into launch truth.
       const fullRoots = buildWorkspaceRoots(fastInventory, discoveryList, cfg.extraRoots)
       state.sessionList = buildSessionIndex(fullRoots, fastInventory, state.workspaceSessions, discoveryList, cfg.maxSessions)
       state.meta = buildMeta(target, health.data, discoveryList, fastInventory, state.workspaceSessions, health.latencyMs, cfg)
       state.meta.cache = { source: "router", cachedAt: now(), warm: true }
+      if (state.meta?.ready && state.meta.sessions?.latest?.id && state.meta.sessions?.latest?.directory) {
+        clearRecoveryState(state, "ready")
+        state.availabilityAt = now()
+        await ensureEnterReady(state, target, state.meta.sessions.latest, cfg)
+        for (const trackedClient of state.clients.values()) {
+          setWarm(trackedClient, {
+            active: false,
+            ready: true,
+            first: false,
+            percent: 100,
+            stage: "ready",
+            note: "Discovered historical sessions during workspace scan. Opening now...",
+            cachedAt: now(),
+            latestSessionID: state.meta.sessions.latest.id,
+            latestDirectory: state.meta.sessions.latest.directory,
+            error: null,
+          })
+        }
+      } else if (state.targetStatus === "no-session") {
+        clearRecoveryState(state, "no-session")
+      }
       saveStateCache(state, cfg)
     }).catch(() => {})
 

@@ -179,6 +179,7 @@ function progressPayload(state, client) {
     offline: state.offline,
     offlineReason: state.offlineReason,
     cacheState: !state.meta ? "cold" : refreshing ? "stale" : "warm",
+    accelMode: state.config?.accelMode || "safe",
     syncState,
     staleReason: client.staleReason || null,
     lastAction: action,

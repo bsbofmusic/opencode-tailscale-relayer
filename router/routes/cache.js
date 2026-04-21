@@ -33,17 +33,7 @@ function parseJsonArray(body) {
 }
 
 function rewriteProjectBody(state, body) {
-  const meta = Array.isArray(state.meta?.projects?.inventory) ? state.meta.projects.inventory : null
-  const seen = new Set()
-  const roots = []
-  for (const dir of [...buildWorkspaceRoots(state.inventory, state.sessionList, state.config?.extraRoots), ...((state.meta?.projects?.roots || []).filter(Boolean))]) {
-    const key = String(dir || "").toLowerCase()
-    if (!dir || seen.has(key)) continue
-    seen.add(key)
-    roots.push(dir)
-  }
-  const source = meta && meta.length ? meta : parseJsonArray(body)
-  return JSON.stringify(projectInventory(source, roots))
+  return String(body || "[]")
 }
 
 function rewritePathBody(directory, body) {
@@ -136,13 +126,6 @@ function maybeServeCached(ctx, req, res) {
   }
 
   if (reqUrl.pathname === "/project/current" && directory) {
-    const item = currentProject(state, directory)
-    if (item?.id && String(item.id).startsWith("relay:")) {
-      state.stats.cacheHit += 1
-      clearLastReason(state, client)
-      raw(res, 200, JSON.stringify(item), "application/json", cacheHeaders(priority))
-      return true
-    }
     const hit = state.projects?.get(directory)
     if (!hit) {
       state.stats.cacheMiss += 1

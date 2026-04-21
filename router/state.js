@@ -536,7 +536,13 @@ function rememberActiveSession(client, reqUrl) {
 }
 
 function requestDirectory(client, reqUrl, hintDirectory) {
-  return reqUrl.searchParams.get("directory") || ""
+  const explicit = reqUrl.searchParams.get("directory") || ""
+  if (explicit) return explicit
+  const { pathSessionView } = require("./util")
+  const ownView = pathSessionView(reqUrl.pathname)
+  if (ownView?.directory) return ownView.directory
+  if (hintDirectory) return hintDirectory
+  return ""
 }
 
 function messageBypass(state, client, directory, sessionID, limit) {

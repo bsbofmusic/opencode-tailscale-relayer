@@ -15,6 +15,7 @@ const counts = {
   health: 0,
   session: 0,
   message: 0,
+  prompt: 0,
   detail: 0,
   config: 0,
   provider: 0,
@@ -242,6 +243,29 @@ const server = http.createServer(async (req, res) => {
     return
   }
 
+  const promptMatch = req.method === "POST" ? url.pathname.match(/^\/session\/([^/]+)\/prompt_async$/) : null
+  if (promptMatch) {
+    if (offline) {
+      send(res, 503, { error: "offline" }, "application/json")
+      return
+    }
+    counts.prompt += 1
+    const sessionID = decodeURIComponent(promptMatch[1])
+    const requestedDirectory = url.searchParams.get("directory") || ""
+    const session = sessions.find((item) => item.id === sessionID)
+    if (!requestedDirectory) {
+      send(res, 400, { error: "directory missing" }, "application/json")
+      return
+    }
+    if (!session || session.directory !== requestedDirectory) {
+      send(res, 409, { error: "directory mismatch" }, "application/json")
+      return
+    }
+    extraMessages.set(sessionID, (extraMessages.get(sessionID) || 0) + 1)
+    send(res, 200, { ok: true, sessionID, directory: requestedDirectory, count: extraMessages.get(sessionID) }, "application/json")
+    return
+  }
+
   if (url.pathname === "/global/config") {
     counts.config += 1
     send(res, 200, { mode: "ok", providers: [] }, "application/json")
@@ -290,7 +314,8 @@ const server = http.createServer(async (req, res) => {
     if (fail("detail", res)) return
     await pause(delays.detail)
     const sessionID = decodeURIComponent(detailMatch[1])
-    send(res, 200, { id: sessionID, directory, title: sessionID, sharing: { disabled: true } }, "application/json")
+    const current = url.searchParams.get('directory') || directory
+    send(res, 200, { id: sessionID, directory: current, title: sessionID, sharing: { disabled: true } }, "application/json")
     return
   }
 

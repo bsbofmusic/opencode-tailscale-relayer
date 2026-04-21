@@ -64,6 +64,7 @@ function createRouter(options) {
       .map((item) => item.trim())
       .filter(Boolean),
     enableProgressQueryOverride: envFlag("OPENCODE_ROUTER_ENABLE_PROGRESS_QUERY_OVERRIDE", false),
+    accelMode: String(process.env.OPENCODE_ROUTER_ACCEL_MODE || "safe").trim().toLowerCase() || "safe",
     healthzDebug: envFlag("OPENCODE_ROUTER_HEALTHZ_DEBUG", false),
     releaseId: process.env.OPENCODE_ROUTER_RELEASE_ID || versionInfo.releaseId,
     contractVersion: process.env.OPENCODE_ROUTER_CONTRACT_VERSION || versionInfo.contractVersion,

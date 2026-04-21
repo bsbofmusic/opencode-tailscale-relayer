@@ -132,18 +132,7 @@ function parseJsonArray(body) {
 }
 
 function rewriteProjectList(state, body) {
-  const meta = Array.isArray(state.meta?.projects?.inventory) ? state.meta.projects.inventory : null
-  const built = buildWorkspaceRoots(state.inventory, state.sessionList, state.config?.extraRoots)
-  const seen = new Set()
-  const roots = []
-  for (const dir of [...built, ...((state.meta?.projects?.roots || []).filter(Boolean))]) {
-    const key = String(dir || "").toLowerCase()
-    if (!dir || seen.has(key)) continue
-    seen.add(key)
-    roots.push(dir)
-  }
-  const source = meta && meta.length ? meta : parseJsonArray(body)
-  return JSON.stringify(projectInventory(source, roots))
+  return String(body || "[]")
 }
 
 function currentProject(state, directory) {
@@ -190,22 +179,6 @@ function proxyRequest(ctx, req, res) {
   const promptMatch = req.method === "POST" ? reqUrl.pathname.match(/^\/session\/([^/]+)\/prompt_async$/) : null
   const promptDirectoryHint = promptRequest ? (headerDirectory || ctx.refererView?.directory || "") : ""
   const directory = requestDirectory(client, reqUrl, ctx.refererView?.directory) || promptDirectoryHint || headerDirectory
-  const syntheticProject = directory ? currentProject(state, directory) : null
-  if (req.method === "GET" && reqUrl.pathname === "/project/current" && syntheticProject?.id && String(syntheticProject.id).startsWith("relay:")) {
-    clearLastReason(state, client)
-    json(res, 200, syntheticProject, relayHeaders(priority, "proxy", "synthetic-project-current"))
-    return
-  }
-  if (req.method === "PATCH" && projectID && String(projectID).startsWith("relay:") && directory) {
-    const item = syntheticProject && syntheticProject.id === projectID ? syntheticProject : {
-      id: projectID,
-      worktree: directory,
-      sandboxes: [],
-    }
-    clearLastReason(state, client)
-    json(res, 200, item, relayHeaders(priority, "proxy", "synthetic-project-open"))
-    return
-  }
   const bootstrapRequest = req.method === "GET" && /^\/(path|project|project\/current|session\/status|global\/config|provider|config|agent)$/.test(reqUrl.pathname)
   const sensitiveStreamRequest = detailRequest || agentRequest || upstreamEventRequest
   const htmlProxyTimeoutMs = config.htmlProxyTimeoutMs || 8000
@@ -454,7 +427,7 @@ function proxyRequest(ctx, req, res) {
 }
 
 function injectRuntime(body, state, target) {
-  const tag = sessionSyncRuntime({ target, meta: state?.meta || null })
+  const tag = sessionSyncRuntime({ target, meta: state?.meta || null, accelMode: state?.config?.accelMode || "safe" })
   if (body.includes("oc-tailnet-sync-runtime")) return body
   if (body.includes("</body>")) return body.replace("</body>", `${tag}</body>`)
   return `${body}${tag}`

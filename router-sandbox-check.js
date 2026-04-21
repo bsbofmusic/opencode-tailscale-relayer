@@ -86,6 +86,7 @@ async function withServers(opts, fn) {
     OPENCODE_ROUTER_CACHE_DIR: config.cacheDir || "",
     OPENCODE_ROUTER_WATCH_INTERVAL_MS: String(config.watchIntervalMs || 0),
     OPENCODE_ROUTER_LAUNCHER_HOSTS: config.launcherHosts || "",
+    OPENCODE_ROUTER_EXTRA_ROOTS: config.extraRoots || "",
     OPENCODE_ROUTER_ENABLE_PROGRESS_QUERY_OVERRIDE: config.enableProgressQueryOverride ? "1" : "0",
   })
   try {
@@ -342,6 +343,76 @@ async function run() {
     assert(meta.data.projects)
     assert(meta.data.projects.roots.includes('D:\\CODE'))
     assert(meta.data.projects.roots.includes('E:\\code'))
+  })
+
+  console.log("[sandbox] scenario-04b native-session-bootstrap-parity")
+  await withServers({ sessionCount: 8, directories: 'D:\\CODE|E:\\code' }, async () => {
+    const altDirectory = 'E:\\code'
+    const altSessionID = 'ses_extra_2'
+    const client = withClient('client_native_parity1')
+    const shellUrl = `${base}/${encodeDir(altDirectory)}/session/${altSessionID}?${client}`
+    const shell = await fetch(shellUrl)
+    const shellText = await shell.text()
+    assert.equal(shell.status, 200)
+    assert(shellText.includes('Sandbox App'))
+
+    const pathRes = await fetch(`${base}/path?${client}`, { headers: { referer: shellUrl } })
+    const pathData = await pathRes.json()
+    assert.equal(pathRes.status, 200)
+    assert.equal(pathData.directory, altDirectory)
+    assert.equal(pathData.worktree, altDirectory)
+
+    const currentRes = await fetch(`${base}/project/current?${client}`, { headers: { referer: shellUrl } })
+    const currentData = await currentRes.json()
+    assert.equal(currentRes.status, 200)
+    assert.equal(currentData.worktree, altDirectory)
+    assert.equal(currentData.id, 'proj_2')
+
+    const detailRes = await fetch(`${base}/session/${altSessionID}?${client}`, { headers: { referer: shellUrl } })
+    const detailData = await detailRes.json()
+    assert.equal(detailRes.status, 200)
+    assert.equal(detailData.directory, altDirectory)
+    assert.equal(detailData.id, altSessionID)
+  })
+
+  console.log("[sandbox] scenario-04c native-send-directory-propagation")
+  await withServers({ sessionCount: 8, directories: 'D:\\CODE|E:\\code' }, async () => {
+    const altDirectory = 'E:\\code'
+    const altSessionID = 'ses_extra_2'
+    const client = withClient('client_native_send1')
+    const shellUrl = `${base}/${encodeDir(altDirectory)}/session/${altSessionID}?${client}`
+    const shell = await fetch(shellUrl)
+    assert.equal(shell.status, 200)
+
+    const send = await fetch(`${base}/session/${altSessionID}/prompt_async?${client}`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        referer: shellUrl,
+      },
+      body: JSON.stringify({ parts: [{ type: 'text', text: 'native parity probe' }] }),
+    })
+    const sendData = await send.json()
+    assert.equal(send.status, 200)
+    assert.equal(sendData.directory, altDirectory)
+
+    const messages = await fetch(`${base}/session/${altSessionID}/message?limit=80&${client}`, { headers: { referer: shellUrl } })
+    const messageText = await messages.text()
+    assert.equal(messages.status, 200)
+    assert(messageText.includes(`${altSessionID}_msg_4`))
+  })
+
+  console.log("[sandbox] scenario-04d extra-root-stays-out-of-default-project-surface")
+  await withServers({ sessionCount: 4, directories: 'D:\\CODE', extraRoots: 'E:\\code' }, async () => {
+    const meta = await getJson(`${base}/__oc/meta?${target}`)
+    assert.equal(meta.res.status, 200)
+    assert(meta.data.projects.roots.includes('E:\\code'))
+    assert.equal(meta.data.projects.inventory.some((item) => String(item.id || '').startsWith('relay:')), false)
+
+    const projectRes = await fetch(`${base}/project?${target}`)
+    const projectRows = JSON.parse(await projectRes.text())
+    assert.equal(projectRes.status, 200)
+    assert.equal(projectRows.some((item) => String(item.id || '').startsWith('relay:')), false)
   })
 
   console.log("[sandbox] scenario-05 transient-detail-failure")
